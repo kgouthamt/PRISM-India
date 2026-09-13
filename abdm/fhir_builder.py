@@ -11,14 +11,17 @@ def _now_iso() -> str:
 def generate_fhir_bundle(
     patient_id: str,
     drug: str,
-    genotype: str,
+    test_type: str,
+    test_result: str,
     recommendation_given: str,
     decision: str,
     override_reason: str = None,
 ) -> dict:
     """Build a FHIR Bundle with a DiagnosticReport and a MedicationRequest.
 
-    `decision` is ACCEPTED or OVERRIDDEN, matching storage.audit_logger.
+    `test_type` is "Genotype" or "Phenotype" and `test_result` is the raw lab
+    value behind the recommendation. `decision` is ACCEPTED or OVERRIDDEN,
+    matching storage.audit_logger.
     """
     timestamp = _now_iso()
     patient_reference = {"reference": f"Patient/{patient_id}", "display": patient_id}
@@ -35,19 +38,23 @@ def generate_fhir_bundle(
                     "display": "Pharmacogenomic analysis panel",
                 }
             ],
-            "text": "Pharmacogenomic (PGx) Genotype Report",
+            "text": "Pharmacogenomic / Phenotypic Test Report",
         },
         "subject": patient_reference,
         "effectiveDateTime": timestamp,
         "issued": timestamp,
         "extension": [
             {
-                "url": "http://prism-india.org/fhir/StructureDefinition/genotype",
-                "valueString": genotype,
-            }
+                "url": "http://prism-india.org/fhir/StructureDefinition/test-type",
+                "valueString": test_type,
+            },
+            {
+                "url": "http://prism-india.org/fhir/StructureDefinition/test-result",
+                "valueString": test_result,
+            },
         ],
         "conclusion": (
-            f"Genotype/allele status: {genotype}. "
+            f"{test_type} result: {test_result}. "
             f"PRISM-India recommendation for {drug}: {recommendation_given}"
         ),
     }

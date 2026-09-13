@@ -11,73 +11,93 @@ st.set_page_config(page_title="PRISM-India", page_icon="🧬", layout="centered"
 st.title("PRISM-India: Bedside Pharmacogenomics Decision Support")
 st.caption("Team ID: DENDRITE-PE-XD-018")
 
-DEMO_PATIENTS = {
-    "Patient A - CYP2C19 poor metabolizer": {
-        "patient_id": "DEMO-A-001",
-        "drug": "Clopidogrel",
-        "genotype": "*2/*2",
-    },
-    "Patient B - HLA-B*15:02 carrier": {
-        "patient_id": "DEMO-B-002",
-        "drug": "Carbamazepine",
-        "genotype": "Positive",
-    },
-    "Patient C - Normal / safe": {
-        "patient_id": "DEMO-C-003",
-        "drug": "Abacavir",
-        "genotype": "*1/*1",
-    },
+DRUG_OPTIONS = [
+    "Clopidogrel",
+    "Carbamazepine",
+    "Allopurinol",
+    "Abacavir",
+    "Primaquine",
+    "Rasburicase",
+    "Tacrolimus",
+]
+
+TEST_RESULT_PLACEHOLDERS = {
+    ("clopidogrel", "Genotype"): "*2/*2",
+    ("clopidogrel", "Phenotype"): "> 208",
+    ("carbamazepine", "Genotype"): "Positive",
+    ("allopurinol", "Genotype"): "Positive",
+    ("abacavir", "Genotype"): "Positive",
+    ("primaquine", "Genotype"): "Deficient",
+    ("primaquine", "Phenotype"): "< 10%",
+    ("rasburicase", "Genotype"): "Deficient",
+    ("rasburicase", "Phenotype"): "< 10%",
+    ("tacrolimus", "Phenotype"): "18 ng/mL",
 }
+
+
+def _test_result_placeholder(drug: str, test_type: str) -> str:
+    return TEST_RESULT_PLACEHOLDERS.get((drug.lower(), test_type), "Enter test result")
+
 
 decision_tab, audit_tab = st.tabs(["Clinical Decision Support", "Audit & Governance Log"])
 
+with st.sidebar:
+    st.header("Patient & Prescription Details")
+    patient_id = st.text_input("Patient ID", placeholder="e.g. PT-1001")
+    drug = st.selectbox("Drug Requested", DRUG_OPTIONS)
+    test_type_choice = st.radio(
+        "Test Data Available:", ["Genotype Assay", "Phenotype / Clinical Test"]
+    )
+    test_type = "Genotype" if test_type_choice == "Genotype Assay" else "Phenotype"
+    test_result = st.text_input(
+        "Test Result", placeholder=_test_result_placeholder(drug, test_type)
+    )
+    evaluate_clicked = st.button("Evaluate", type="primary")
+
 with decision_tab:
-    st.sidebar.header("Demo Patients")
-    selected_patient = st.sidebar.radio("Select a patient", list(DEMO_PATIENTS.keys()))
+    st.subheader("Decision Support Output")
 
-    if st.session_state.get("_last_patient") != selected_patient:
-        st.session_state["_last_patient"] = selected_patient
-        st.session_state["result"] = None
-        st.session_state["show_override"] = False
-        st.session_state["fhir_bundle"] = None
-
-    patient = DEMO_PATIENTS[selected_patient]
-
-    st.subheader("Patient Details")
-    patient_id = st.text_input("Patient ID", value=patient["patient_id"])
-    col1, col2 = st.columns(2)
-    with col1:
-        drug = st.text_input("Requested Drug", value=patient["drug"])
-    with col2:
-        genotype = st.text_input("Genotype / Allele Status", value=patient["genotype"])
-
-    if st.button("Evaluate", type="primary"):
-        st.session_state["result"] = evaluate_prescription(drug, genotype)
-        st.session_state["show_override"] = False
-        st.session_state["fhir_bundle"] = None
+    if evaluate_clicked:
+        if not patient_id.strip() or not test_result.strip():
+            st.warning("Patient ID and Test Result are required before evaluating.")
+        else:
+            st.session_state["result"] = evaluate_prescription(drug, test_type, test_result)
+            st.session_state["eval_context"] = {
+                "patient_id": patient_id.strip(),
+                "drug": drug,
+                "test_type": test_type,
+                "test_result": test_result.strip(),
+            }
+            st.session_state["show_override"] = False
+            st.session_state["fhir_bundle"] = None
 
     result = st.session_state.get("result")
+    context = st.session_state.get("eval_context")
 
-    if result:
-        st.subheader("Decision Support Output")
-        recommendation_given = result["recommendation"] or result["reason"]
+    if not result:
+        st.info(
+            "Enter a Patient ID, select a drug, choose Genotype or Phenotype, "
+            "provide the test result in the sidebar, then click Evaluate."
+        )
+    else:
+        recommendation_given = result["recommendation_and_dosage"] or result["reason"]
 
         if result["risk"] == "HIGH":
             st.error(
                 f"⚠️ HIGH RISK — {result['reason']}\n\n"
-                f"**Recommendation:** {result['recommendation']}"
+                f"**Recommended Action & Dosage:** {result['recommendation_and_dosage']}"
             )
 
             col_accept, col_override = st.columns(2)
             with col_accept:
                 if st.button("Accept"):
                     log_decision(
-                        patient_id, drug, genotype, recommendation_given,
-                        "ACCEPTED", None,
+                        context["patient_id"], context["drug"], context["test_type"],
+                        context["test_result"], recommendation_given, "ACCEPTED", None,
                     )
                     st.session_state["fhir_bundle"] = generate_fhir_bundle(
-                        patient_id, drug, genotype, recommendation_given,
-                        "ACCEPTED", None,
+                        context["patient_id"], context["drug"], context["test_type"],
+                        context["test_result"], recommendation_given, "ACCEPTED", None,
                     )
                     st.success("Decision recorded to audit log")
             with col_override:
@@ -89,27 +109,32 @@ with decision_tab:
                 if st.button("Submit Override"):
                     if justification.strip():
                         log_decision(
-                            patient_id, drug, genotype, recommendation_given,
-                            "OVERRIDDEN", justification.strip(),
+                            context["patient_id"], context["drug"], context["test_type"],
+                            context["test_result"], recommendation_given, "OVERRIDDEN",
+                            justification.strip(),
                         )
                         st.session_state["fhir_bundle"] = generate_fhir_bundle(
-                            patient_id, drug, genotype, recommendation_given,
-                            "OVERRIDDEN", justification.strip(),
+                            context["patient_id"], context["drug"], context["test_type"],
+                            context["test_result"], recommendation_given, "OVERRIDDEN",
+                            justification.strip(),
                         )
                         st.success("Decision recorded to audit log")
                     else:
                         st.info("Please provide a justification before submitting the override.")
 
         elif result["risk"] == "SAFE":
-            st.success(f"✅ SAFE — {result['reason']}")
+            st.success(
+                f"✅ SAFE — {result['reason']}\n\n"
+                f"**Recommended Action & Dosage:** {result['recommendation_and_dosage']}"
+            )
             if st.button("Accept"):
                 log_decision(
-                    patient_id, drug, genotype, recommendation_given,
-                    "ACCEPTED", None,
+                    context["patient_id"], context["drug"], context["test_type"],
+                    context["test_result"], recommendation_given, "ACCEPTED", None,
                 )
                 st.session_state["fhir_bundle"] = generate_fhir_bundle(
-                    patient_id, drug, genotype, recommendation_given,
-                    "ACCEPTED", None,
+                    context["patient_id"], context["drug"], context["test_type"],
+                    context["test_result"], recommendation_given, "ACCEPTED", None,
                 )
                 st.success("Decision recorded to audit log")
 
@@ -123,7 +148,7 @@ with decision_tab:
                 st.download_button(
                     "Download FHIR Bundle (JSON)",
                     data=json.dumps(fhir_bundle, indent=2),
-                    file_name=f"fhir_bundle_{patient_id}.json",
+                    file_name=f"fhir_bundle_{context['patient_id']}.json",
                     mime="application/json",
                 )
 

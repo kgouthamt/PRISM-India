@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     timestamp TEXT NOT NULL,
     patient_id TEXT,
     drug TEXT,
-    genotype TEXT,
+    test_type TEXT,
+    test_result TEXT,
     recommendation_given TEXT,
     clinician_decision TEXT,
     override_reason TEXT
@@ -31,7 +32,8 @@ def _get_connection():
 def log_decision(
     patient_id: str,
     drug: str,
-    genotype: str,
+    test_type: str,
+    test_result: str,
     recommendation_given: str,
     clinician_decision: str,
     override_reason: str = None,
@@ -42,15 +44,16 @@ def log_decision(
         conn.execute(
             """
             INSERT INTO decisions
-                (timestamp, patient_id, drug, genotype, recommendation_given,
-                 clinician_decision, override_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (timestamp, patient_id, drug, test_type, test_result,
+                 recommendation_given, clinician_decision, override_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now().isoformat(timespec="seconds"),
                 patient_id,
                 drug,
-                genotype,
+                test_type,
+                test_result,
                 recommendation_given,
                 clinician_decision,
                 override_reason,
