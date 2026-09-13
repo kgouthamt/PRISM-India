@@ -69,9 +69,19 @@ India's Ayushman Bharat Digital Mission (ABDM) requires health data to be portab
 
 ## Execution Guide
 
-PRISM-India is fully containerized. The only prerequisite is **Docker** and **Docker Compose**.
+PRISM-India is fully containerized and runs identically on **Windows**, **macOS**, and **Linux**. The recommended path is Docker Compose; a native (non-Docker) path is also provided for local development.
+
+### Prerequisites
+
+| OS | Install |
+|----|---------|
+| **Windows 10/11** | [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/) with the WSL2 backend enabled. Run all commands below from **PowerShell**, **Command Prompt**, or a **WSL2** terminal. |
+| **macOS** (Intel or Apple Silicon) | [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/). Run all commands below from **Terminal**. |
+| **Linux** | Docker Engine + the Compose plugin, e.g. on Ubuntu/Debian: `sudo apt-get update && sudo apt-get install docker.io docker-compose-plugin`. Add your user to the `docker` group (`sudo usermod -aG docker $USER`, then log out/in) to avoid needing `sudo` on every command. |
 
 ### 1. Clone the repository
+
+Identical on all three platforms:
 
 ```bash
 git clone https://github.com/kgouthamt/PRISM-India.git
@@ -79,6 +89,8 @@ cd PRISM-India
 ```
 
 ### 2. Build and run with Docker Compose
+
+Identical on all three platforms — Docker abstracts away the OS:
 
 ```bash
 docker compose up --build
@@ -98,12 +110,37 @@ http://localhost:8501
 docker compose down
 ```
 
+---
+
 ### Running without Docker (local development)
 
-```bash
+Requires **Python 3.11+** installed natively ([python.org](https://www.python.org/downloads/) on Windows/macOS, or your Linux distro's package manager). Virtual-environment activation syntax differs by shell, so follow the block for your platform.
+
+**Windows (PowerShell):**
+```powershell
+python -m venv venv
+venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+**Windows (Command Prompt):**
+```cmd
+python -m venv venv
+venv\Scripts\activate.bat
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+**macOS / Linux (bash/zsh):**
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+In every case, the app is served at `http://localhost:8501`. Deactivate the virtual environment when finished with `deactivate` (all platforms).
 
 ---
 
