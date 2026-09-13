@@ -1,5 +1,8 @@
+import json
+
 import streamlit as st
 
+from abdm.fhir_builder import generate_fhir_bundle
 from engine.rules import evaluate_prescription
 from storage.audit_logger import get_all_logs, log_decision
 
@@ -36,6 +39,7 @@ with decision_tab:
         st.session_state["_last_patient"] = selected_patient
         st.session_state["result"] = None
         st.session_state["show_override"] = False
+        st.session_state["fhir_bundle"] = None
 
     patient = DEMO_PATIENTS[selected_patient]
 
@@ -50,6 +54,7 @@ with decision_tab:
     if st.button("Evaluate", type="primary"):
         st.session_state["result"] = evaluate_prescription(drug, genotype)
         st.session_state["show_override"] = False
+        st.session_state["fhir_bundle"] = None
 
     result = st.session_state.get("result")
 
@@ -70,6 +75,10 @@ with decision_tab:
                         patient_id, drug, genotype, recommendation_given,
                         "ACCEPTED", None,
                     )
+                    st.session_state["fhir_bundle"] = generate_fhir_bundle(
+                        patient_id, drug, genotype, recommendation_given,
+                        "ACCEPTED", None,
+                    )
                     st.success("Decision recorded to audit log")
             with col_override:
                 if st.button("Override"):
@@ -80,6 +89,10 @@ with decision_tab:
                 if st.button("Submit Override"):
                     if justification.strip():
                         log_decision(
+                            patient_id, drug, genotype, recommendation_given,
+                            "OVERRIDDEN", justification.strip(),
+                        )
+                        st.session_state["fhir_bundle"] = generate_fhir_bundle(
                             patient_id, drug, genotype, recommendation_given,
                             "OVERRIDDEN", justification.strip(),
                         )
@@ -94,10 +107,25 @@ with decision_tab:
                     patient_id, drug, genotype, recommendation_given,
                     "ACCEPTED", None,
                 )
+                st.session_state["fhir_bundle"] = generate_fhir_bundle(
+                    patient_id, drug, genotype, recommendation_given,
+                    "ACCEPTED", None,
+                )
                 st.success("Decision recorded to audit log")
 
         else:
             st.info(result["reason"])
+
+        fhir_bundle = st.session_state.get("fhir_bundle")
+        if fhir_bundle:
+            with st.expander("ABDM / FHIR Interoperability Record"):
+                st.json(fhir_bundle)
+                st.download_button(
+                    "Download FHIR Bundle (JSON)",
+                    data=json.dumps(fhir_bundle, indent=2),
+                    file_name=f"fhir_bundle_{patient_id}.json",
+                    mime="application/json",
+                )
 
 with audit_tab:
     st.subheader("Audit & Governance Log")
