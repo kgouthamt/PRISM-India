@@ -8,34 +8,42 @@
 
 Adverse drug reactions driven by genetic variation are a well-documented, largely preventable cause of harm — yet the pharmacogenomic (PGx) evidence base (CPIC, ABDM's own genomics roadmap) rarely reaches the point of care in a form a prescriber can act on in seconds. A lab report showing `CYP2C19 *2/*2` or `HLA-B*15:02: Positive` is clinically meaningless to a doctor mid-consult unless it is translated into a concrete prescribing action: *stop, switch, or proceed*.
 
-**PRISM-India closes that gap.** It is a bedside decision-support layer that sits between the genotype and the prescription pad: a clinician enters (or the system pulls) a patient's genotype and the drug they intend to prescribe, and PRISM instantly returns a deterministic, guideline-backed verdict — **SAFE** or **HIGH RISK** — along with an actionable alternative. Every decision a clinician makes in response, whether they accept the recommendation or override it, is captured in an immutable audit trail and exported as an ABDM-compliant FHIR bundle, so the system is not just a calculator but a governance-ready component of the national digital health stack.
+**PRISM-India closes that gap.** It is a bedside decision-support layer that sits between the lab result and the prescription pad: a clinician enters the drug they intend to prescribe, indicates whether they're working from a **genotype assay** or a **phenotype/clinical test** (a diplotype, an allele status, an enzyme activity level, a drug trough level), and the raw result, and PRISM instantly returns a deterministic, guideline-backed verdict — **SAFE** or **HIGH RISK** — along with a specific recommended action *and dosage* (switch drug, escalate to a named mg/day dose, reduce/increase/maintain a dose, or avoid entirely). Every decision a clinician makes in response, whether they accept the recommendation or override it, is captured in an immutable audit trail and exported as an ABDM-compliant FHIR bundle, so the system is not just a calculator but a governance-ready component of the national digital health stack.
 
-In short: PRISM-India turns a genotype into a prescribing decision, and turns that decision into an auditable, interoperable clinical record.
+In short: PRISM-India turns a genotype or phenotype result into a concrete, dosed prescribing decision, and turns that decision into an auditable, interoperable clinical record.
 
 ---
 
 ## Clinical Workflow
 
-### The 4-Pair MVP Logic
+### The Genotype & Phenotype Dosage Engine
 
-PRISM-India's rule engine (`engine/rules.py`) implements four deterministic gene–drug pairs, each mapped to a single, unambiguous prescribing action:
+PRISM-India's rule engine (`engine/rules.py`) exposes a single function, `evaluate_prescription(drug, test_type, test_result)`, where `test_type` is `"Genotype"` or `"Phenotype"`. It covers seven drugs across two evidence modalities, each mapped to a specific, dosed prescribing action:
 
-| # | Gene | Drug | Trigger | Verdict | Recommended Action |
-|---|------|------|---------|---------|---------------------|
-| 1 | **CYP2C19** | Clopidogrel | Genotype carries `*2` or `*3` | HIGH RISK — reduced platelet-inhibitor activation | Switch to **Prasugrel** |
-| 2 | **HLA-B\*15:02** | Carbamazepine | Allele status **Positive** | HIGH RISK — Stevens-Johnson Syndrome / TEN | **Avoid** carbamazepine |
-| 3 | **HLA-B\*58:01** | Allopurinol | Allele status **Positive** | HIGH RISK — severe cutaneous adverse reaction | Switch to **Febuxostat** |
-| 4 | **HLA-B\*57:01** | Abacavir | Allele status **Positive** | HIGH RISK — hypersensitivity reaction | **Avoid** abacavir |
+| Drug | Evidence | Trigger | Verdict | Recommended Action & Dosage |
+|------|----------|---------|---------|-------------------------------|
+| **Clopidogrel** | CYP2C19 Genotype | `*1/*1` (normal) | SAFE | Standard dose: 75 mg/day |
+| **Clopidogrel** | CYP2C19 Genotype | `*1/*2` or `*1/*3` (intermediate) | HIGH RISK | Prefer Prasugrel/Ticagrelor; if unavoidable, escalate to 225 mg/day |
+| **Clopidogrel** | CYP2C19 Genotype | `*2/*2`, `*2/*3`, `*3/*3` (poor) | HIGH RISK | Avoid entirely; prescribe Prasugrel or Ticagrelor |
+| **Clopidogrel** | Platelet Reactivity (PRU) Phenotype | PRU > 208 | HIGH RISK | Recommend Prasugrel or Ticagrelor |
+| **Clopidogrel** | Platelet Reactivity (PRU) Phenotype | PRU ≤ 208 | SAFE | Standard dose: 75 mg/day |
+| **Carbamazepine** | HLA-B\*15:02 Genotype | Positive | HIGH RISK — Stevens-Johnson Syndrome / TEN | Avoid carbamazepine entirely |
+| **Allopurinol** | HLA-B\*58:01 Genotype | Positive | HIGH RISK — severe cutaneous adverse reaction | Avoid; prescribe Febuxostat instead |
+| **Abacavir** | HLA-B\*57:01 Genotype | Positive | HIGH RISK — hypersensitivity reaction | Avoid abacavir entirely |
+| **Primaquine / Rasburicase** | G6PD Genotype or Enzyme Activity Phenotype | Deficient variant, or activity < 10% | HIGH RISK — hemolytic anemia | Avoid drug entirely |
+| **Tacrolimus** | Trough Level Phenotype | > 15 ng/mL | HIGH RISK — nephrotoxicity | Reduce dose and recheck trough level |
+| **Tacrolimus** | Trough Level Phenotype | < 5 ng/mL | HIGH RISK — rejection risk | Increase dose and recheck trough level |
+| **Tacrolimus** | Trough Level Phenotype | 5–15 ng/mL | SAFE | Maintain current dose |
 
-A normal/negative genotype (e.g. `*1/*1`, or allele status **Negative**) for any of the four pairs returns a **SAFE** verdict. Any genotype or drug outside this MVP scope returns a transparent `No actionable guidance -> No automated prescribing recommendation`, rather than a false negative — PRISM never fabricates confidence it doesn't have.
+A normal/negative result (e.g. `*1/*1`, allele status **Negative**, or an enzyme level/trough comfortably inside range) returns a **SAFE** verdict. Any drug, test type, or result outside this scope — an unrecognized diplotype, a non-numeric phenotype value, or a drug/test-type combination with no defined rule — returns a transparent `No actionable guidance -> No automated prescribing recommendation`, rather than a false negative. PRISM never fabricates confidence it doesn't have.
 
 ### The CPIC Guideline Lock
 
-Every rule is a direct, hard-coded translation of a published **CPIC (Clinical Pharmacogenetics Implementation Consortium)** guideline. This is a deliberate design choice for a clinical safety tool:
+Every rule is a direct, hard-coded translation of a published **CPIC (Clinical Pharmacogenetics Implementation Consortium)** guideline, whether the supporting evidence is a genotype or a phenotypic/clinical test. This is a deliberate design choice for a clinical safety tool:
 
 - **Deterministic, not probabilistic.** The engine is pure Python logic (no ML, no inference) — the same input always produces the same output, which is a requirement for clinical auditability and regulatory trust.
-- **No silent drift.** Thresholds and recommendations cannot change without a code change and review, unlike a model that could quietly re-weight its own outputs.
-- **Traceable to source.** Every verdict can be traced back to the specific CPIC guideline pair that produced it, which is essential when a clinician or auditor asks "why did the system say this?"
+- **No silent drift.** Thresholds, dosages, and recommendations cannot change without a code change and review, unlike a model that could quietly re-weight its own outputs.
+- **Traceable to source.** Every verdict carries an `evidence_type` field naming the exact gene, enzyme, or clinical marker it was based on, so a clinician or auditor can always answer "why did the system say this?"
 
 This "guideline lock" is what makes PRISM-India defensible as a *decision support* tool rather than a black box — it augments the clinician's judgement instead of replacing it.
 
@@ -51,7 +59,7 @@ PRISM never blocks a prescription — it flags risk and hands the final call bac
 
 - On a **HIGH RISK** verdict, the clinician can **Accept** the system's alternative recommendation, or **Override** it.
 - Overriding requires a **mandatory free-text clinical justification** (e.g. "patient tolerated this drug previously; specialist consulted") — an override with no reasoning cannot be submitted.
-- Every decision — `ACCEPTED` or `OVERRIDDEN`, with the justification when applicable — is written immediately to a persistent **SQLite audit log** (`storage/audit_logger.py`, `decisions.db`) with a timestamp, patient ID, drug, genotype, and the recommendation that was given.
+- Every decision — `ACCEPTED` or `OVERRIDDEN`, with the justification when applicable — is written immediately to a persistent **SQLite audit log** (`storage/audit_logger.py`, `decisions.db`) with a timestamp, patient ID, drug, test type (Genotype/Phenotype), the raw test result, and the recommendation that was given. The connection layer is self-healing: if the on-disk schema ever falls out of sync with the code (e.g. after a rule-engine upgrade), it is detected and rebuilt automatically on the next write, with no manual migration step.
 - The **Audit & Governance Log** tab in the dashboard surfaces this entire history in a live table, so a hospital's clinical governance committee can review — in real time — exactly which PRISM warnings were followed and which were overridden, and why.
 
 This turns "doctor overrode an AI warning" from an invisible risk into a reviewable, defensible clinical decision.
@@ -61,7 +69,7 @@ This turns "doctor overrode an AI warning" from an invisible risk into a reviewa
 India's Ayushman Bharat Digital Mission (ABDM) requires health data to be portable across providers in a standard format. PRISM-India does not create a data silo:
 
 - Every clinician decision (accepted or overridden) is compiled by `abdm/fhir_builder.py` into a standards-shaped **FHIR R4 `Bundle`** containing:
-  - A **`DiagnosticReport`** resource capturing the patient's genotype/allele status and the PRISM recommendation as its conclusion.
+  - A **`DiagnosticReport`** resource capturing the patient's test type (Genotype/Phenotype), the raw test result, and the PRISM recommendation as its conclusion.
   - A **`MedicationRequest`** resource capturing the final prescribed drug, the clinician's decision, and the override justification (if any) as a clinical note.
 - The bundle is rendered live in an **"ABDM / FHIR Interoperability Record"** expander (`st.json`) directly in the dashboard, and can be downloaded as a `.json` file for ingestion into a Health Information Exchange, ABDM sandbox, or hospital EHR — no separate export tooling required.
 
