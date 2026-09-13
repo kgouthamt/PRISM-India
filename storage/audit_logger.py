@@ -23,9 +23,25 @@ CREATE TABLE IF NOT EXISTS decisions (
 """
 
 
+_EXPECTED_COLUMNS = {
+    "id", "timestamp", "patient_id", "drug", "test_type", "test_result",
+    "recommendation_given", "clinician_decision", "override_reason",
+}
+
+
 def _get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.execute(_SCHEMA)
+
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(decisions)")}
+    if existing_columns != _EXPECTED_COLUMNS:
+        # A decisions.db created under an older schema (e.g. a bare `genotype`
+        # column) can't be reconciled with ALTER TABLE alone; rebuild it. This
+        # is a demo audit log, not a system of record, so dropping stale rows
+        # on a schema change is an acceptable, zero-maintenance recovery path.
+        conn.execute("DROP TABLE IF EXISTS decisions")
+        conn.execute(_SCHEMA)
+
     return conn
 
 
