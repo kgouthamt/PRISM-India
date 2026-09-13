@@ -1,4 +1,12 @@
-"""Deterministic pharmacogenomic + phenotypic rule engine (CPIC-based) with dosage guidance."""
+"""Deterministic pharmacogenomic + phenotypic rule engine (CPIC-based) with dosage guidance.
+
+Public API: evaluate_prescription(drug, test_type, test_result) -> dict, where the
+returned dict always has exactly these keys:
+    - risk: "SAFE" | "HIGH" | "UNKNOWN"
+    - reason: human-readable clinical rationale
+    - recommendation_and_dosage: action + dosage text, or None when risk is UNKNOWN
+    - evidence_type: which test/marker the verdict was based on, or None if unrecognized
+"""
 
 import re
 
@@ -202,6 +210,10 @@ def evaluate_prescription(drug: str, test_type: str, test_result: str) -> dict:
     `test_type` is "Genotype" or "Phenotype"; `test_result` is the free-text
     lab value (a CYP2C19 diplotype, an HLA allele status, a PRU score, a
     G6PD enzyme percentage/status, or a tacrolimus trough level).
+
+    Supported drugs: Clopidogrel (Genotype + Phenotype), Carbamazepine,
+    Allopurinol, Abacavir (Genotype), Primaquine, Rasburicase
+    (Genotype + Phenotype), Tacrolimus (Phenotype).
     """
     drug_key = (drug or "").strip().lower()
     test_type = (test_type or "").strip().capitalize()
