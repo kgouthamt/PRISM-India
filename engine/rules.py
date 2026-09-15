@@ -18,7 +18,7 @@ RISK_HIGH = "HIGH"
 RISK_NO_ALERT = "NO ACTIONABLE ALERT"
 RISK_UNKNOWN = "UNKNOWN"
 
-RULE_VERSION = "2.0.0"
+RULE_VERSION = "3.0.0"
 GUIDELINE_VERSION = "CPIC (2024 consolidated guidelines)"
 EVIDENCE_SOURCE = "CPIC (Clinical Pharmacogenetics Implementation Consortium)"
 
@@ -261,6 +261,90 @@ def _evaluate_tacrolimus(test_type: str, test_result: str) -> dict:
     return _unknown()
 
 
+def _parse_warfarin_genotype(test_result: str):
+    """Parse 'CYP2C9=*1/*2;VKORC1=AG' (case/spacing tolerant) into (cyp2c9, vkorc1)."""
+    cyp2c9 = None
+    vkorc1 = None
+    for part in (test_result or "").split(";"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip().upper()
+        if key == "CYP2C9":
+            cyp2c9 = _normalize_diplotype(value)
+        elif key == "VKORC1":
+            vkorc1 = value.strip().upper()
+    return cyp2c9, vkorc1
+
+
+def _cyp2c9_category(diplotype):
+    if diplotype in {"*1/*1"}:
+        return "normal"
+    if diplotype in {"*1/*2", "*1/*3"}:
+        return "intermediate"
+    if diplotype in {"*2/*2", "*2/*3", "*3/*3"}:
+        return "poor"
+    return None
+
+
+def _vkorc1_category(genotype):
+    if genotype in {"GG"}:
+        return "normal"
+    if genotype in {"AG"}:
+        return "intermediate"
+    if genotype in {"AA"}:
+        return "high"
+    return None
+
+
+def _evaluate_warfarin_pgx(test_result: str) -> dict:
+    """Simplified CYP2C9 + VKORC1 combined warfarin sensitivity category.
+
+    This is a categorical simplification of CPIC's warfarin dosing guideline
+    (which uses a full pharmacogenetic dosing algorithm incorporating age,
+    weight, amiodarone use, and other covariates) -- it classifies relative
+    dose-reduction need and monitoring intensity, not an exact starting
+    mg/day dose.
+    """
+    evidence_type = "CYP2C9 + VKORC1 Genotype"
+    cyp2c9_dip, vkorc1_geno = _parse_warfarin_genotype(test_result)
+    cyp2c9_cat = _cyp2c9_category(cyp2c9_dip)
+    vkorc1_cat = _vkorc1_category(vkorc1_geno)
+
+    if cyp2c9_cat is None or vkorc1_cat is None:
+        return _unknown(evidence_type)
+
+    if cyp2c9_cat == "poor" or vkorc1_cat == "high":
+        return _result(
+            RISK_HIGH,
+            f"Highly increased warfarin sensitivity (CYP2C9 {cyp2c9_dip}, VKORC1 {vkorc1_geno})",
+            "Substantially reduce initial dose (~50-80% below standard, per CPIC "
+            "categorical guidance) and increase INR monitoring frequency",
+            evidence_type,
+        )
+    if cyp2c9_cat == "intermediate" or vkorc1_cat == "intermediate":
+        return _result(
+            RISK_HIGH,
+            f"Increased warfarin sensitivity (CYP2C9 {cyp2c9_dip}, VKORC1 {vkorc1_geno})",
+            "Reduce initial dose (~30-50% below standard, per CPIC categorical "
+            "guidance) and increase INR monitoring frequency",
+            evidence_type,
+        )
+    return _result(
+        RISK_NO_ALERT,
+        f"Normal warfarin sensitivity (CYP2C9 {cyp2c9_dip}, VKORC1 {vkorc1_geno})",
+        "Standard initial dosing with routine INR-guided titration",
+        evidence_type,
+    )
+
+
+def _evaluate_warfarin(test_type: str, test_result: str) -> dict:
+    if test_type == "Genotype":
+        return _evaluate_warfarin_pgx(test_result)
+    return _unknown()
+
+
 def evaluate_prescription(drug: str, test_type: str, test_result: str) -> dict:
     """Evaluate a requested drug against a genotype or phenotype test result.
 
@@ -270,7 +354,8 @@ def evaluate_prescription(drug: str, test_type: str, test_result: str) -> dict:
 
     Supported drugs: Clopidogrel (Genotype + Phenotype), Carbamazepine,
     Allopurinol, Abacavir (Genotype), Primaquine, Rasburicase
-    (Genotype + Phenotype), Tacrolimus (Genotype PGx + Phenotype TDM).
+    (Genotype + Phenotype), Tacrolimus (Genotype PGx + Phenotype TDM),
+    Warfarin (Genotype: combined CYP2C9 + VKORC1).
     """
     drug_key = (drug or "").strip().lower()
     test_type = (test_type or "").strip().capitalize()
@@ -283,5 +368,7 @@ def evaluate_prescription(drug: str, test_type: str, test_result: str) -> dict:
         return _evaluate_g6pd(test_type, test_result)
     if drug_key == "tacrolimus":
         return _evaluate_tacrolimus(test_type, test_result)
+    if drug_key == "warfarin":
+        return _evaluate_warfarin(test_type, test_result)
 
     return _unknown()

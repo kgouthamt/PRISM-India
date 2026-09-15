@@ -111,5 +111,47 @@ class TestTacrolimusPGxAndTDMAreSeparate(unittest.TestCase):
             self.assertNotIn("PGx", result["evidence_type"])
 
 
+class TestWarfarinCombinedGenotype(unittest.TestCase):
+    def test_normal_cyp2c9_and_vkorc1_is_no_actionable_alert(self):
+        result = evaluate_prescription("Warfarin", "Genotype", "CYP2C9=*1/*1;VKORC1=GG")
+        self.assertEqual(result["risk"], RISK_NO_ALERT)
+        self.assertEqual(
+            result["recommendation_and_dosage"],
+            "Standard initial dosing with routine INR-guided titration",
+        )
+
+    def test_intermediate_cyp2c9_increases_sensitivity(self):
+        result = evaluate_prescription("Warfarin", "Genotype", "CYP2C9=*1/*2;VKORC1=GG")
+        self.assertEqual(result["risk"], RISK_HIGH)
+        self.assertIn("30-50%", result["recommendation_and_dosage"])
+
+    def test_vkorc1_heterozygous_alone_increases_sensitivity(self):
+        result = evaluate_prescription("Warfarin", "Genotype", "CYP2C9=*1/*1;VKORC1=AG")
+        self.assertEqual(result["risk"], RISK_HIGH)
+        self.assertIn("30-50%", result["recommendation_and_dosage"])
+
+    def test_poor_cyp2c9_is_highly_increased_sensitivity(self):
+        result = evaluate_prescription("Warfarin", "Genotype", "CYP2C9=*2/*2;VKORC1=GG")
+        self.assertEqual(result["risk"], RISK_HIGH)
+        self.assertIn("50-80%", result["recommendation_and_dosage"])
+
+    def test_vkorc1_homozygous_variant_is_highly_increased_sensitivity(self):
+        result = evaluate_prescription("Warfarin", "Genotype", "CYP2C9=*1/*1;VKORC1=AA")
+        self.assertEqual(result["risk"], RISK_HIGH)
+        self.assertIn("50-80%", result["recommendation_and_dosage"])
+
+    def test_unrecognized_diplotype_is_unknown(self):
+        result = evaluate_prescription("Warfarin", "Genotype", "CYP2C9=*9/*9;VKORC1=GG")
+        self.assertEqual(result["risk"], RISK_UNKNOWN)
+
+    def test_malformed_genotype_string_is_unknown(self):
+        result = evaluate_prescription("Warfarin", "Genotype", "garbage")
+        self.assertEqual(result["risk"], RISK_UNKNOWN)
+
+    def test_phenotype_is_not_modeled_for_warfarin(self):
+        result = evaluate_prescription("Warfarin", "Phenotype", "2.5")
+        self.assertEqual(result["risk"], RISK_UNKNOWN)
+
+
 if __name__ == "__main__":
     unittest.main()

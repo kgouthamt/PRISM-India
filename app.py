@@ -3,6 +3,7 @@ import json
 import streamlit as st
 
 from abdm.fhir_builder import generate_fhir_bundle
+from engine.ddi import ALL_INTERACTING_DRUGS
 from engine.rules import (
     EVIDENCE_SOURCE,
     GUIDELINE_VERSION,
@@ -11,23 +12,25 @@ from engine.rules import (
     RULE_VERSION,
     evaluate_prescription,
 )
+from engine.triage import TRIAGE_CONSIDER, TRIAGE_HIGH, triage_pgx_actionability
 from storage.audit_logger import get_all_logs, log_decision
 
-SOFTWARE_VERSION = "PRISM-India v2.0.0"
+SOFTWARE_VERSION = "PRISM-India v3.0.0"
 
 st.set_page_config(page_title="PRISM-India", page_icon="🧬", layout="centered")
 
-st.title("PRISM-India: Bedside Pharmacogenomics Decision Support")
+st.title("PRISM-India: Cost-Conscious Clinical + PGx Decision Support")
 st.caption("Team ID: DENDRITE-PE-XD-018")
 
 DRUG_OPTIONS = [
     "Clopidogrel",
+    "Warfarin",
+    "Tacrolimus",
     "Carbamazepine",
     "Allopurinol",
     "Abacavir",
     "Primaquine",
     "Rasburicase",
-    "Tacrolimus",
 ]
 
 VERIFICATION_STATUS_OPTIONS = [
@@ -36,8 +39,12 @@ VERIFICATION_STATUS_OPTIONS = [
     "Unverified",
 ]
 
+CYP2C9_OPTIONS = ["*1/*1", "*1/*2", "*1/*3", "*2/*2", "*2/*3", "*3/*3"]
+VKORC1_OPTIONS = ["GG", "AG", "AA"]
+
 # Every (drug, test_type) combination the rule engine has a defined rule for,
 # and the strictly validated widget used to capture its result -- no free text.
+# Warfarin is handled separately (a compound CYP2C9 + VKORC1 genotype), below.
 TEST_RESULT_OPTIONS = {
     ("clopidogrel", "Genotype"): {
         "type": "select",
@@ -80,7 +87,27 @@ def _render_test_result_input(drug: str, test_type: str):
     Returns the result as a string, or None if this combination has no defined
     rule (evaluate_prescription resolves that to an UNKNOWN verdict).
     """
-    spec = TEST_RESULT_OPTIONS.get((drug.lower(), test_type))
+    drug_key = drug.lower()
+
+    if drug_key == "warfarin":
+        if test_type != "Genotype":
+            st.selectbox(
+                "Test Result",
+                ["Not applicable -- Warfarin genetic dosing uses Genotype only"],
+                disabled=True,
+                help="Routine INR monitoring, not a phenotype rule, governs "
+                     "warfarin's day-to-day titration in this MVP; see the "
+                     "Pre-Test Triage tab.",
+            )
+            return None
+        col_a, col_b = st.columns(2)
+        with col_a:
+            cyp2c9 = st.selectbox("CYP2C9 Diplotype", CYP2C9_OPTIONS)
+        with col_b:
+            vkorc1 = st.selectbox("VKORC1 Genotype", VKORC1_OPTIONS)
+        return f"CYP2C9={cyp2c9};VKORC1={vkorc1}"
+
+    spec = TEST_RESULT_OPTIONS.get((drug_key, test_type))
     if spec is None:
         st.selectbox(
             "Test Result",
@@ -99,12 +126,61 @@ def _render_test_result_input(drug: str, test_type: str):
     return str(value)
 
 
-decision_tab, audit_tab = st.tabs(["Clinical Decision Support", "Audit & Governance Log"])
+triage_tab, decision_tab, audit_tab = st.tabs(
+    ["Pre-Test Triage", "Clinical Decision Support", "Audit & Governance Log"]
+)
 
 with st.sidebar:
+    st.header("Drug Requested")
+    drug = st.selectbox("Drug", DRUG_OPTIONS)
+    drug_key = drug.lower()
+
+    st.markdown("---")
+    st.header("Pre-Test Clinical Context")
+    st.caption("Feeds the Clinical Engine and DDI Engine (Pre-Test Triage tab).")
+    concurrent_medications = st.multiselect(
+        "Concurrent Medications",
+        options=[med.title() for med in ALL_INTERACTING_DRUGS],
+        help="Checked against known severe interactions for the selected drug.",
+    )
+
+    triage_labs = {}
+    if drug_key == "tacrolimus":
+        col1, col2 = st.columns(2)
+        with col1:
+            triage_labs["egfr"] = st.number_input(
+                "eGFR (mL/min/1.73m²)", min_value=0.0, max_value=150.0, value=90.0, step=1.0
+            )
+            triage_labs["alt"] = st.number_input(
+                "ALT (U/L)", min_value=0.0, max_value=1000.0, value=25.0, step=1.0
+            )
+        with col2:
+            triage_labs["ast"] = st.number_input(
+                "AST (U/L)", min_value=0.0, max_value=1000.0, value=25.0, step=1.0
+            )
+            triage_labs["total_bilirubin"] = st.number_input(
+                "Total Bilirubin (mg/dL)", min_value=0.0, max_value=30.0, value=0.8, step=0.1
+            )
+    elif drug_key == "warfarin":
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            triage_labs["inr"] = st.number_input(
+                "Baseline INR", min_value=0.5, max_value=8.0, value=1.0, step=0.1
+            )
+        with col2:
+            triage_labs["platelets"] = st.number_input(
+                "Platelets (x10³/µL)", min_value=0.0, max_value=800.0, value=250.0, step=5.0
+            )
+        with col3:
+            triage_labs["hemoglobin"] = st.number_input(
+                "Hemoglobin (g/dL)", min_value=0.0, max_value=20.0, value=14.0, step=0.1
+            )
+
+    triage_clicked = st.button("Run Pre-Test Triage")
+
+    st.markdown("---")
     st.header("Patient & Prescription Details")
     patient_id = st.text_input("Patient ID", placeholder="e.g. PT-1001")
-    drug = st.selectbox("Drug Requested", DRUG_OPTIONS)
     test_type_choice = st.radio(
         "Test Data Available:", ["Genotype Assay", "Phenotype / Clinical Test"]
     )
@@ -163,6 +239,58 @@ def _log_and_export(clinician_decision: str, override_reason: str = None) -> Non
     )
     st.success("Decision recorded to audit log")
 
+
+with triage_tab:
+    st.subheader("Pre-Test PGx Actionability Triage")
+    st.caption(
+        "Tier 1 (Clinical Engine: routine labs) and Tier 2 (DDI Engine) combine "
+        "here to answer one question before any genetic test is ordered: is "
+        "PGx testing for this drug actually likely to change this patient's "
+        "management?"
+    )
+
+    if triage_clicked:
+        st.session_state["triage_result"] = triage_pgx_actionability(
+            drug, concurrent_medications, **triage_labs
+        )
+        st.session_state["triage_drug"] = drug
+
+    triage_result = st.session_state.get("triage_result")
+
+    if not triage_result:
+        st.info(
+            "Select a drug, any concurrent medications, and relevant labs in "
+            "the sidebar, then click Run Pre-Test Triage."
+        )
+    else:
+        triage_drug = st.session_state.get("triage_drug", drug)
+        triage_state = triage_result["triage"]
+
+        if triage_state == TRIAGE_HIGH:
+            st.error(f"🔴 HIGH PRIORITY — PGx testing for {triage_drug} is strongly indicated")
+        elif triage_state == TRIAGE_CONSIDER:
+            st.warning(f"🟡 CONSIDER — genetic information for {triage_drug} may influence treatment")
+        else:
+            st.success(f"🟢 LOW PRIORITY — PGx testing for {triage_drug} is unlikely to change management")
+
+        st.markdown("**Rationale:**")
+        for line in triage_result["rationale"]:
+            st.markdown(f"- {line}")
+
+        if triage_result["ddi_findings"]:
+            st.markdown("**Drug-Drug Interaction (DDI Engine) Findings:**")
+            for finding in triage_result["ddi_findings"]:
+                st.warning(
+                    f"**{finding['severity']}** — "
+                    f"{', '.join(m.title() for m in finding['matched_medications'])}: "
+                    f"{finding['mechanism']}\n\n"
+                    f"**Recommendation:** {finding['recommendation']}\n\n"
+                    f"*Source: {finding['source']}*"
+                )
+
+        if triage_result["clinical_findings"]:
+            st.markdown("**Clinical Engine (Routine Labs) Findings:**")
+            st.json(triage_result["clinical_findings"])
 
 with decision_tab:
     st.subheader("Decision Support Output")
