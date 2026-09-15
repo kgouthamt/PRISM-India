@@ -1,102 +1,131 @@
-"""Tier 1 of the PRISM-India pre-test triage pipeline: routine clinical labs.
+"""Tier 1 of the PRISM-India pre-test triage pipeline: objective clinical data.
 
-Assesses standard Liver Function Tests (LFT), Renal Function Tests (RFT), and
-Complete Blood Count / Coagulation values -- labs a clinician already has on
-hand *before* ordering any pharmacogenomic test -- against published
-reference thresholds. This tier answers "does routine clinical data already
-explain the risk, or point to a dose adjustment, without needing genetic
-testing?"
+Assesses only routine, objective inputs a clinician already has on hand
+*before* ordering any pharmacogenomic test -- Age, Weight, LFT, RFT/eGFR,
+CBC/platelets, and PT/INR/aPTT -- against published reference thresholds.
+Subjective inputs (patient-reported history, e.g. a prior ADR or a prior
+treatment failure) are deliberately out of scope: this tier answers "does
+objective, routine clinical data already explain the risk, or point to a
+dose adjustment, without needing genetic testing?"
+
+LFT, RFT/eGFR, and CBC/platelets are collected as coarse Normal / Abnormal /
+Unknown categories (not raw lab values), so this tier deliberately does not
+synthesize a precise severity grade (e.g. a specific KDIGO G-stage) it has no
+numeric data to support -- an "Abnormal" flag names the guideline that
+governs further work-up instead.
 
 Sources:
-    - Renal function staging: KDIGO 2024 Clinical Practice Guideline for CKD.
-    - Hepatic impairment framing: CDSCO / National Formulary of India (NFI),
-      used here for empirical dose-caution guidance rather than a formal
-      Child-Pugh score (which needs albumin/ascites/encephalopathy data this
-      prototype does not collect).
+    - Renal function: KDIGO 2024 Clinical Practice Guideline for CKD.
+    - Hepatic function: CDSCO / National Formulary of India (NFI), used here
+      for empirical dose-caution framing rather than a formal Child-Pugh
+      score (which needs albumin/ascites/encephalopathy data this prototype
+      does not collect).
+    - Age/weight dosing context: FDA guidance on pediatric and weight-based
+      dosing.
 """
 
 KDIGO_SOURCE = "KDIGO 2024"
 NFI_SOURCE = "CDSCO / National Formulary of India"
+FDA_DOSING_SOURCE = "FDA Guidance (Pediatric / Weight-Based Dosing)"
 
-# (eGFR lower bound, stage, category, nephrotoxicity_risk) per KDIGO 2024.
-_KDIGO_EGFR_STAGES = [
-    (90, "G1", "Normal or high", "LOW"),
-    (60, "G2", "Mildly decreased", "LOW"),
-    (45, "G3a", "Mildly to moderately decreased", "MODERATE"),
-    (30, "G3b", "Moderately to severely decreased", "HIGH"),
-    (15, "G4", "Severely decreased", "HIGH"),
-    (0, "G5", "Kidney failure", "HIGH"),
-]
+_VALID_CATEGORIES = {"Normal", "Abnormal", "Unknown"}
 
-_ALT_ULN = 40.0
-_AST_ULN = 40.0
-_BILIRUBIN_ULN = 1.2
+_PEDIATRIC_AGE_YEARS = 18
+_LOW_WEIGHT_KG = 40.0
+_ABNORMAL_PT_INR_APTT_THRESHOLD = 1.3
 
 
-def assess_renal_function(egfr: float = None) -> dict:
-    """Classify renal function per KDIGO 2024 eGFR staging (mL/min/1.73m^2).
+def _normalize_category(value: str) -> str:
+    """Coerce free-form input to exactly 'Normal', 'Abnormal', or 'Unknown'."""
+    candidate = (value or "Unknown").strip().capitalize()
+    return candidate if candidate in _VALID_CATEGORIES else "Unknown"
 
-    Returns {"stage", "category", "nephrotoxicity_risk", "source"}.
+
+def assess_renal_function(rft_egfr: str = "Unknown") -> dict:
+    """Classify renal risk from a coarse RFT/eGFR category.
+
+    Returns {"rft_egfr", "nephrotoxicity_risk", "detail", "source"}.
     """
-    if egfr is None:
-        return {
-            "stage": None,
-            "category": "Not provided",
-            "nephrotoxicity_risk": "UNKNOWN",
-            "source": KDIGO_SOURCE,
-        }
-    for threshold, stage, category, risk in _KDIGO_EGFR_STAGES:
-        if egfr >= threshold:
-            return {"stage": stage, "category": category, "nephrotoxicity_risk": risk, "source": KDIGO_SOURCE}
-    return {"stage": "G5", "category": "Kidney failure", "nephrotoxicity_risk": "HIGH", "source": KDIGO_SOURCE}
-
-
-def assess_hepatic_function(alt: float = None, ast: float = None, total_bilirubin: float = None) -> dict:
-    """Flag hepatic impairment severity from routine LFTs (ALT/AST in U/L,
-    bilirubin in mg/dL), for empirical dosing caution per the National
-    Formulary of India.
-
-    Returns {"impairment", "detail", "source"}.
-    """
-    if alt is None or ast is None or total_bilirubin is None:
-        return {"impairment": "UNKNOWN", "detail": "Incomplete LFT panel", "source": NFI_SOURCE}
-
-    transaminase_ratio = max(alt / _ALT_ULN, ast / _AST_ULN)
-    bilirubin_ratio = total_bilirubin / _BILIRUBIN_ULN
-
-    if bilirubin_ratio >= 2 or transaminase_ratio >= 5:
-        impairment = "SEVERE"
-    elif bilirubin_ratio >= 1.5 or transaminase_ratio >= 3:
-        impairment = "MODERATE"
-    elif bilirubin_ratio > 1 or transaminase_ratio > 1:
-        impairment = "MILD"
-    else:
-        impairment = "NONE"
-
+    category = _normalize_category(rft_egfr)
     detail = {
-        "NONE": "LFTs within normal limits",
-        "MILD": "Mild transaminase/bilirubin elevation; empirical dose caution per NFI",
-        "MODERATE": "Moderate hepatic impairment; consider empirical dose reduction per NFI",
-        "SEVERE": "Severe hepatic impairment; avoid or substantially reduce dose per NFI",
-    }[impairment]
+        "Normal": "RFT/eGFR within normal limits",
+        "Abnormal": "Abnormal RFT/eGFR; obtain a precise eGFR for KDIGO 2024 "
+                    "staging and adjust nephrotoxic drug dosing accordingly",
+        "Unknown": "RFT/eGFR not provided",
+    }[category]
+    risk = {"Normal": "LOW", "Abnormal": "HIGH", "Unknown": "UNKNOWN"}[category]
+    return {"rft_egfr": category, "nephrotoxicity_risk": risk, "detail": detail, "source": KDIGO_SOURCE}
 
-    return {"impairment": impairment, "detail": detail, "source": NFI_SOURCE}
 
+def assess_hepatic_function(lft: str = "Unknown") -> dict:
+    """Classify hepatic-impairment risk from a coarse LFT category, for
+    empirical dosing caution per the National Formulary of India.
 
-def assess_bleeding_risk_labs(inr: float = None, platelets: float = None, hemoglobin: float = None) -> dict:
-    """Baseline bleeding-risk signal from coagulation/CBC (INR unitless,
-    platelets in x10^3/uL, hemoglobin in g/dL) -- relevant before starting an
-    anticoagulant such as warfarin.
-
-    Returns {"baseline_bleeding_risk", "flags", "source"}.
+    Returns {"lft", "impairment_risk", "detail", "source"}.
     """
+    category = _normalize_category(lft)
+    detail = {
+        "Normal": "LFT within normal limits",
+        "Abnormal": "Abnormal LFT; empirical dose caution and closer "
+                    "monitoring required per NFI, independent of genotype",
+        "Unknown": "LFT not provided",
+    }[category]
+    risk = {"Normal": "LOW", "Abnormal": "HIGH", "Unknown": "UNKNOWN"}[category]
+    return {"lft": category, "impairment_risk": risk, "detail": detail, "source": NFI_SOURCE}
+
+
+def _normalize_pt_inr_aptt(pt_inr_aptt) -> str:
+    """Accept either a Normal/Abnormal/Unknown category or a numeric INR-like
+    value and resolve both to a single 'Normal' | 'Abnormal' | 'Unknown'.
+    """
+    if isinstance(pt_inr_aptt, str):
+        candidate = pt_inr_aptt.strip().capitalize()
+        if candidate in _VALID_CATEGORIES:
+            return candidate
+    try:
+        value = float(pt_inr_aptt)
+    except (TypeError, ValueError):
+        return "Unknown"
+    return "Abnormal" if value > _ABNORMAL_PT_INR_APTT_THRESHOLD else "Normal"
+
+
+def assess_bleeding_risk_labs(cbc_platelets: str = "Unknown", pt_inr_aptt=None) -> dict:
+    """Baseline bleeding-risk signal from CBC/platelets (Normal/Abnormal/
+    Unknown) and PT/INR/aPTT (Normal/Abnormal/Unknown, or a raw numeric
+    INR-like value) -- relevant before starting an anticoagulant such as
+    warfarin. Only an explicit "Abnormal" result raises risk; "Unknown"
+    never does, since there is nothing to flag.
+
+    Returns {"cbc_platelets", "pt_inr_aptt", "baseline_bleeding_risk", "flags", "source"}.
+    """
+    cbc_category = _normalize_category(cbc_platelets)
+    pt_category = _normalize_pt_inr_aptt(pt_inr_aptt)
+
     flags = []
-    if inr is not None and inr > 1.3:
-        flags.append(f"Elevated baseline INR ({inr})")
-    if platelets is not None and platelets < 100:
-        flags.append(f"Thrombocytopenia (platelets {platelets} x10^3/uL)")
-    if hemoglobin is not None and hemoglobin < 10:
-        flags.append(f"Anemia (hemoglobin {hemoglobin} g/dL)")
+    if cbc_category == "Abnormal":
+        flags.append("Abnormal CBC/platelets (possible thrombocytopenia or hematologic abnormality)")
+    if pt_category == "Abnormal":
+        flags.append("Abnormal PT/INR/aPTT (elevated baseline bleeding/coagulation risk)")
 
     risk = "HIGH" if flags else "LOW"
-    return {"baseline_bleeding_risk": risk, "flags": flags, "source": "Routine Coagulation/CBC"}
+    return {
+        "cbc_platelets": cbc_category,
+        "pt_inr_aptt": pt_category,
+        "baseline_bleeding_risk": risk,
+        "flags": flags,
+        "source": "Routine Coagulation/CBC",
+    }
+
+
+def assess_age_weight_context(age: float = None, weight: float = None) -> dict:
+    """Flag pediatric-age or low-body-weight dosing considerations per FDA
+    guidance on pediatric and weight-based dosing.
+
+    Returns {"age", "weight", "flags", "source"}.
+    """
+    flags = []
+    if age is not None and age < _PEDIATRIC_AGE_YEARS:
+        flags.append(f"Pediatric patient (age {age}); confirm weight-based dosing per FDA guidance")
+    if weight is not None and weight < _LOW_WEIGHT_KG:
+        flags.append(f"Low body weight ({weight} kg); confirm weight-based dose calculation")
+    return {"age": age, "weight": weight, "flags": flags, "source": FDA_DOSING_SOURCE}

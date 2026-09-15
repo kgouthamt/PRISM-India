@@ -1,4 +1,10 @@
-"""Unit tests for engine.triage (Tier 3: PGx Actionability Triage)."""
+"""Unit tests for engine.triage (Tier 3: PGx Actionability Triage).
+
+Covers only objective, routine inputs (drug, labs, DDIs, age/weight) --
+there is deliberately no test exercising a "previous ADR" or "previous
+treatment failure" parameter, since triage_pgx_actionability has no such
+parameter to begin with.
+"""
 
 import unittest
 
@@ -10,10 +16,11 @@ class TestClopidogrelTriage(unittest.TestCase):
         result = triage_pgx_actionability("Clopidogrel")
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
-    def test_surfaces_omeprazole_ddi(self):
+    def test_surfaces_omeprazole_ddi_as_a_warning(self):
         result = triage_pgx_actionability("Clopidogrel", ["Omeprazole"])
         self.assertEqual(result["triage"], TRIAGE_HIGH)
         self.assertEqual(len(result["ddi_findings"]), 1)
+        self.assertTrue(any("CYP2C19-inhibiting" in w for w in result["warnings"]))
 
 
 class TestTacrolimusTriage(unittest.TestCase):
@@ -21,39 +28,69 @@ class TestTacrolimusTriage(unittest.TestCase):
         result = triage_pgx_actionability("Tacrolimus")
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
-    def test_surfaces_nephrotoxicity_risk(self):
-        result = triage_pgx_actionability("Tacrolimus", egfr=25)
-        renal_finding = result["clinical_findings"][0]
-        self.assertEqual(renal_finding["nephrotoxicity_risk"], "HIGH")
+    def test_normal_labs_produce_no_warnings(self):
+        result = triage_pgx_actionability("Tacrolimus", lft="Normal", rft_egfr="Normal")
+        self.assertEqual(result["warnings"], [])
 
-    def test_surfaces_hepatic_impairment(self):
-        result = triage_pgx_actionability("Tacrolimus", alt=300, ast=280, total_bilirubin=3.0)
-        hepatic_finding = result["clinical_findings"][1]
-        self.assertEqual(hepatic_finding["impairment"], "SEVERE")
+    def test_abnormal_rft_egfr_triggers_mandatory_tdm_warning(self):
+        result = triage_pgx_actionability("Tacrolimus", rft_egfr="Abnormal")
+        self.assertTrue(any("mandatory" in w.lower() for w in result["warnings"]))
+        self.assertTrue(any("KDIGO" in w for w in result["warnings"]))
+
+    def test_abnormal_lft_triggers_mandatory_tdm_warning(self):
+        result = triage_pgx_actionability("Tacrolimus", lft="Abnormal")
+        self.assertTrue(any("mandatory" in w.lower() for w in result["warnings"]))
+        self.assertTrue(any("NFI" in w for w in result["warnings"]))
+
+    def test_both_abnormal_produce_two_warnings(self):
+        result = triage_pgx_actionability("Tacrolimus", lft="Abnormal", rft_egfr="Abnormal")
+        self.assertEqual(len(result["warnings"]), 2)
 
 
 class TestWarfarinTriage(unittest.TestCase):
     def test_low_risk_defaults_to_consider(self):
-        result = triage_pgx_actionability("Warfarin", inr=1.0, platelets=250, hemoglobin=14)
+        result = triage_pgx_actionability("Warfarin", cbc_platelets="Normal", pt_inr_aptt="Normal")
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
 
-    def test_severe_ddi_escalates_to_high_priority(self):
-        result = triage_pgx_actionability("Warfarin", ["Amiodarone"], inr=1.0, platelets=250, hemoglobin=14)
+    def test_unknown_labs_do_not_escalate(self):
+        result = triage_pgx_actionability("Warfarin")
+        self.assertEqual(result["triage"], TRIAGE_CONSIDER)
+
+    def test_abnormal_pt_inr_aptt_escalates_to_high_priority(self):
+        result = triage_pgx_actionability("Warfarin", pt_inr_aptt="Abnormal")
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
-    def test_nsaid_ddi_escalates_to_high_priority(self):
-        result = triage_pgx_actionability("Warfarin", ["Ibuprofen"], inr=1.0, platelets=250, hemoglobin=14)
+    def test_numeric_pt_inr_aptt_above_threshold_escalates(self):
+        result = triage_pgx_actionability("Warfarin", pt_inr_aptt=1.6)
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
-    def test_high_baseline_bleeding_risk_escalates_to_high_priority(self):
-        result = triage_pgx_actionability("Warfarin", inr=1.6, platelets=250, hemoglobin=14)
+    def test_abnormal_cbc_platelets_escalates_to_high_priority(self):
+        result = triage_pgx_actionability("Warfarin", cbc_platelets="Abnormal")
+        self.assertEqual(result["triage"], TRIAGE_HIGH)
+
+    def test_severe_ddi_amiodarone_escalates_to_high_priority(self):
+        result = triage_pgx_actionability("Warfarin", ["Amiodarone"])
+        self.assertEqual(result["triage"], TRIAGE_HIGH)
+
+    def test_severe_ddi_nsaid_escalates_to_high_priority(self):
+        result = triage_pgx_actionability("Warfarin", ["Ibuprofen"])
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
     def test_no_risk_factors_never_reaches_low_priority(self):
-        # Warfarin PGx can always inform an initial dose to some degree --
-        # CONSIDER is the floor, never LOW PRIORITY.
         result = triage_pgx_actionability("Warfarin")
         self.assertIn(result["triage"], (TRIAGE_CONSIDER, TRIAGE_HIGH))
+
+
+class TestAgeWeightContextSurfacesAcrossDrugs(unittest.TestCase):
+    def test_pediatric_and_low_weight_flags_appear_in_rationale(self):
+        result = triage_pgx_actionability("Clopidogrel", age=10, weight=25)
+        self.assertTrue(any("Pediatric" in line for line in result["rationale"]))
+        self.assertTrue(any("Low body weight" in line for line in result["rationale"]))
+
+    def test_age_weight_finding_is_always_present(self):
+        result = triage_pgx_actionability("Clopidogrel")
+        sources = [f.get("source") for f in result["clinical_findings"]]
+        self.assertTrue(any("FDA" in (s or "") for s in sources))
 
 
 class TestOutOfScopeDrug(unittest.TestCase):

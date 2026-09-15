@@ -19,16 +19,27 @@ This reframes the product from "what does this genotype mean?" to "should we eve
 The Pre-Test Triage Engine (`engine/triage.py`) is a multi-layer assessment, not a single lookup. It combines two independent evidence tiers into one recommendation:
 
 ### Tier 1 — Clinical Engine (`engine/clinical.py`)
-Assesses routine lab values the clinician already has — no genetic test required:
-- **Renal function (RFT)** — `assess_renal_function(egfr)` stages eGFR per **KDIGO 2024** and flags nephrotoxicity risk.
-- **Hepatic function (LFT)** — `assess_hepatic_function(alt, ast, total_bilirubin)` grades hepatic impairment severity for empirical dose-caution framing.
-- **Coagulation / CBC** — `assess_bleeding_risk_labs(inr, platelets, hemoglobin)` flags elevated baseline bleeding risk before starting an anticoagulant.
+Assesses only **objective, routine data the clinician already has — never subjective patient-reported history.** There is no "previous adverse drug reaction" or "previous treatment failure" input anywhere in this pipeline: those are real clinical signals, but they aren't the kind of routine, verifiable data this tier is scoped to reason about. The inputs are exactly:
+
+| Parameter | Widget | Values |
+|-----------|--------|--------|
+| `age` | Number input | Years |
+| `weight` | Number input | kg |
+| `lft` | Selectbox | Normal / Abnormal / Unknown |
+| `rft_egfr` | Selectbox | Normal / Abnormal / Unknown |
+| `cbc_platelets` | Selectbox | Normal / Abnormal / Unknown |
+| `pt_inr_aptt` | Selectbox, or a numeric INR value | Normal / Abnormal / Unknown / a raw number |
+
+- **`assess_renal_function(rft_egfr)`** — flags nephrotoxicity risk per **KDIGO 2024**. Because the input is a coarse category rather than a raw eGFR number, an "Abnormal" result is reported as exactly that — a flag naming KDIGO as the guideline for further staging — rather than a fabricated numeric G-stage the engine has no data to support.
+- **`assess_hepatic_function(lft)`** — flags hepatic-impairment risk for empirical dose-caution framing per **CDSCO's National Formulary of India**, on the same Normal/Abnormal/Unknown basis.
+- **`assess_bleeding_risk_labs(cbc_platelets, pt_inr_aptt)`** — flags elevated baseline bleeding risk before starting an anticoagulant. Only an explicit **Abnormal** result (or a numeric PT/INR/aPTT value past threshold) raises risk; **Unknown** never does.
+- **`assess_age_weight_context(age, weight)`** — flags pediatric-age or low-body-weight dosing considerations per **FDA guidance on pediatric and weight-based dosing**, surfaced for every drug regardless of which triage path it takes.
 
 ### Tier 2 — DDI Engine (`engine/ddi.py`)
-`check_drug_interactions(drug, concurrent_medications)` checks the patient's current medication list against a curated table of clinically significant drug-drug interactions for each modeled drug, returning severity, mechanism, and an actionable recommendation for every match.
+`check_drug_interactions(drug, concurrent_medications)` checks the patient's current medication list — entered as a comma-separated **Concomitant Drugs** text field — against a curated table of clinically significant drug-drug interactions for each modeled drug, returning severity, mechanism, and an actionable recommendation for every match.
 
 ### Tier 3 — PGx Actionability Triage (`engine/triage.py`)
-`triage_pgx_actionability(drug, concurrent_medications, **clinical_context)` combines Tier 1 and Tier 2 findings into one of three states:
+`triage_pgx_actionability(drug, concurrent_medications, age=, weight=, lft=, rft_egfr=, cbc_platelets=, pt_inr_aptt=)` combines Tier 1 and Tier 2 findings — and *only* those — into one of three states:
 
 | State | Meaning |
 |-------|---------|
@@ -37,6 +48,8 @@ Assesses routine lab values the clinician already has — no genetic test requir
 | 🟢 **LOW PRIORITY** | Testing is unlikely to change management (including drugs outside this MVP's triage scope, which are reported as low priority with an explicit "not modeled" rationale rather than a fabricated assessment). |
 
 This triage runs in the **Pre-Test Triage** tab of the dashboard, entirely independent of `engine/rules.py` (the downstream genotype/phenotype → dosing engine covered in previous iterations of this prototype): triage answers *"should we test?"*, `evaluate_prescription()` answers *"given the result, what do we do?"*
+
+The result dict separates two kinds of output: `rationale` explains *why* the triage level was chosen, while a distinct `warnings` list carries strong, lab-driven safety alerts that stand independently of the triage color itself — e.g. Tacrolimus's mandatory-TDM warning on an abnormal RFT/LFT, rendered in the dashboard as its own red alert block beneath the rationale bullets.
 
 ---
 
@@ -63,10 +76,10 @@ The triage layer's MVP scope is three drugs, chosen specifically because each de
 Always triages 🔴 **HIGH PRIORITY**: an FDA boxed warning and CPIC guidance both treat CYP2C19 poor/intermediate metabolizer status as directly actionable for antiplatelet selection. The DDI Engine layers on top of that: prescribing clopidogrel alongside a strong CYP2C19 inhibitor such as **omeprazole** independently reduces clopidogrel activation, compounding — not replacing — the genetic risk. Downstream, `evaluate_prescription()` maps the resulting CYP2C19 genotype (normal / intermediate / poor) to a specific antiplatelet recommendation (see prior sections of this codebase's history for the exact dosing table).
 
 ### Tacrolimus (CYP3A5) — the nephrotoxicity + hepatic case
-Also always triages 🔴 **HIGH PRIORITY** (narrow therapeutic index, ~1.5–2x starting-dose difference between CYP3A5 expresser/non-expresser genotypes per CPIC) — but the triage rationale is enriched with **Tier 1 findings that exist independently of genotype**: a KDIGO-staged eGFR flags nephrotoxicity risk, and an NFI-framed hepatic impairment grade flags empirical dose caution. A clinician sees *both* signals side by side — the genetic starting-dose adjustment and the routine-lab safety context — rather than one in isolation.
+Also always triages 🔴 **HIGH PRIORITY** (narrow therapeutic index, ~1.5–2x starting-dose difference between CYP3A5 expresser/non-expresser genotypes per CPIC) — but an **Abnormal RFT/eGFR or LFT** result independently produces a **strong clinical warning**, distinct from the triage color itself: PGx sets the starting-dose *baseline*, but an abnormal lab makes lab-driven therapeutic drug monitoring (TDM) *mandatory* regardless of genotype (KDIGO 2024 for renal, NFI for hepatic). A clinician sees both signals side by side — the genetic starting-dose adjustment and the routine-lab safety mandate — rather than one in isolation.
 
 ### Warfarin (CYP2C9 & VKORC1) — the CONSIDER case
-The only one of the three that does **not** default to HIGH PRIORITY. Routine INR-guided dose titration is often sufficient for warfarin management without upfront genetic testing, so the baseline triage state is 🟡 **CONSIDER**. It escalates to 🔴 **HIGH PRIORITY** only when the Clinical Engine flags a high baseline bleeding risk (elevated INR, thrombocytopenia, or anemia) or the DDI Engine finds a severe interaction — **amiodarone** (CYP2C9/3A4 inhibition, raises INR) or an **NSAID** (additive bleeding risk) are both modeled as hard, FDA-labeled severe interactions. Downstream, `evaluate_prescription()` combines a CYP2C9 diplotype and a VKORC1 genotype into a single sensitivity category (normal / increased / highly increased) — a simplified categorical form of CPIC's warfarin dosing framework, not the full multi-covariate pharmacogenetic equation.
+The only one of the three that does **not** default to HIGH PRIORITY. Routine PT/INR-guided dose titration is often sufficient for warfarin management without upfront genetic testing, so the baseline triage state is 🟡 **CONSIDER**. It escalates to 🔴 **HIGH PRIORITY** only if **one of three objective conditions holds**: `pt_inr_aptt` is **Abnormal** (elevated baseline bleeding risk before dosing even starts), `cbc_platelets` is **Abnormal** (compounding hematologic risk), or the DDI Engine detects a severe interaction — **amiodarone** (CYP2C9/3A4 inhibition, raises INR) or an **NSAID** (additive bleeding risk), both modeled as hard, FDA-labeled severe interactions. **Unknown** values never escalate — only a positively **Abnormal** result or a confirmed DDI does. Downstream, `evaluate_prescription()` combines a CYP2C9 diplotype and a VKORC1 genotype into a single sensitivity category (normal / increased / highly increased) — a simplified categorical form of CPIC's warfarin dosing framework, not the full multi-covariate pharmacogenetic equation.
 
 **Scope note:** the five other drugs this prototype models (Carbamazepine, Allopurinol, Abacavir, Primaquine, Rasburicase) retain their existing direct genotype/phenotype-to-dosing rules in `engine/rules.py`, but do not yet have a Tier 1/Tier 2 pre-test triage model — requesting triage for them correctly returns 🟢 LOW PRIORITY with an explicit "not modeled in current MVP scope" rationale, rather than a guess.
 
@@ -138,7 +151,7 @@ In every case, the app is served at `http://localhost:8501`. Deactivate the virt
 
 ## Automated Testing
 
-`tests/` is a `unittest` suite of **55 tests** covering every tier: `test_clinical.py` (renal/hepatic/bleeding-risk lab assessment), `test_ddi.py` (drug-drug interaction matching), `test_triage.py` (all three triage states across Clopidogrel, Tacrolimus, and Warfarin, plus the out-of-scope fallback), and `test_rules.py` (the downstream genotype/phenotype dosing engine, including Warfarin's combined CYP2C9 + VKORC1 categorization).
+`tests/` is a `unittest` suite of **72 tests** covering every tier: `test_clinical.py` (renal/hepatic/bleeding-risk/age-weight assessment from objective Normal/Abnormal/Unknown lab categories), `test_ddi.py` (drug-drug interaction matching), `test_triage.py` (all three triage states across Clopidogrel, Tacrolimus, and Warfarin — including the lab-driven "mandatory TDM" warnings and the requirement that only an explicit Abnormal result or DDI ever escalates, never Unknown), and `test_rules.py` (the downstream genotype/phenotype dosing engine, including Warfarin's combined CYP2C9 + VKORC1 categorization).
 
 Run the full suite from the project root:
 

@@ -39,6 +39,8 @@ VERIFICATION_STATUS_OPTIONS = [
     "Unverified",
 ]
 
+LAB_CATEGORY_OPTIONS = ["Unknown", "Normal", "Abnormal"]
+
 CYP2C9_OPTIONS = ["*1/*1", "*1/*2", "*1/*3", "*2/*2", "*2/*3", "*3/*3"]
 VKORC1_OPTIONS = ["GG", "AG", "AA"]
 
@@ -133,48 +135,40 @@ triage_tab, decision_tab, audit_tab = st.tabs(
 with st.sidebar:
     st.header("Drug Requested")
     drug = st.selectbox("Drug", DRUG_OPTIONS)
-    drug_key = drug.lower()
 
     st.markdown("---")
     st.header("Pre-Test Clinical Context")
-    st.caption("Feeds the Clinical Engine and DDI Engine (Pre-Test Triage tab).")
-    concurrent_medications = st.multiselect(
-        "Concurrent Medications",
-        options=[med.title() for med in ALL_INTERACTING_DRUGS],
-        help="Checked against known severe interactions for the selected drug.",
+    st.caption(
+        "Objective, routine data only -- feeds the Clinical Engine and DDI "
+        "Engine (Pre-Test Triage tab). No patient-reported history (e.g. a "
+        "prior ADR or treatment failure) is collected or used here."
     )
 
-    triage_labs = {}
-    if drug_key == "tacrolimus":
-        col1, col2 = st.columns(2)
-        with col1:
-            triage_labs["egfr"] = st.number_input(
-                "eGFR (mL/min/1.73m²)", min_value=0.0, max_value=150.0, value=90.0, step=1.0
-            )
-            triage_labs["alt"] = st.number_input(
-                "ALT (U/L)", min_value=0.0, max_value=1000.0, value=25.0, step=1.0
-            )
-        with col2:
-            triage_labs["ast"] = st.number_input(
-                "AST (U/L)", min_value=0.0, max_value=1000.0, value=25.0, step=1.0
-            )
-            triage_labs["total_bilirubin"] = st.number_input(
-                "Total Bilirubin (mg/dL)", min_value=0.0, max_value=30.0, value=0.8, step=0.1
-            )
-    elif drug_key == "warfarin":
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            triage_labs["inr"] = st.number_input(
-                "Baseline INR", min_value=0.5, max_value=8.0, value=1.0, step=0.1
-            )
-        with col2:
-            triage_labs["platelets"] = st.number_input(
-                "Platelets (x10³/µL)", min_value=0.0, max_value=800.0, value=250.0, step=5.0
-            )
-        with col3:
-            triage_labs["hemoglobin"] = st.number_input(
-                "Hemoglobin (g/dL)", min_value=0.0, max_value=20.0, value=14.0, step=0.1
-            )
+    col1, col2 = st.columns(2)
+    with col1:
+        age = st.number_input("Age (years)", min_value=0, max_value=120, value=40, step=1)
+    with col2:
+        weight = st.number_input("Weight (kg)", min_value=0.0, max_value=250.0, value=70.0, step=0.5)
+
+    lft = st.selectbox("LFT", LAB_CATEGORY_OPTIONS)
+    rft_egfr = st.selectbox("RFT/eGFR", LAB_CATEGORY_OPTIONS)
+    cbc_platelets = st.selectbox("CBC/Platelets", LAB_CATEGORY_OPTIONS)
+
+    pt_inr_aptt_choice = st.selectbox(
+        "PT/INR/aPTT", LAB_CATEGORY_OPTIONS + ["Enter numeric INR value"]
+    )
+    if pt_inr_aptt_choice == "Enter numeric INR value":
+        pt_inr_aptt = st.number_input("INR value", min_value=0.5, max_value=8.0, value=1.0, step=0.1)
+    else:
+        pt_inr_aptt = pt_inr_aptt_choice
+
+    concomitant_drugs_text = st.text_input(
+        "Concomitant Drugs",
+        placeholder="e.g. Omeprazole, Amiodarone",
+        help="Comma-separated. Checked against known severe interactions. "
+             f"Interactions are modeled for: {', '.join(d.title() for d in ALL_INTERACTING_DRUGS)}.",
+    )
+    concurrent_medications = [d.strip() for d in concomitant_drugs_text.split(",") if d.strip()]
 
     triage_clicked = st.button("Run Pre-Test Triage")
 
@@ -251,7 +245,9 @@ with triage_tab:
 
     if triage_clicked:
         st.session_state["triage_result"] = triage_pgx_actionability(
-            drug, concurrent_medications, **triage_labs
+            drug, concurrent_medications,
+            age=age, weight=weight, lft=lft, rft_egfr=rft_egfr,
+            cbc_platelets=cbc_platelets, pt_inr_aptt=pt_inr_aptt,
         )
         st.session_state["triage_drug"] = drug
 
@@ -276,6 +272,11 @@ with triage_tab:
         st.markdown("**Rationale:**")
         for line in triage_result["rationale"]:
             st.markdown(f"- {line}")
+
+        if triage_result.get("warnings"):
+            st.markdown("**Lab-Driven Safety Warnings:**")
+            for warning_text in triage_result["warnings"]:
+                st.error(warning_text)
 
         if triage_result["ddi_findings"]:
             st.markdown("**Drug-Drug Interaction (DDI Engine) Findings:**")
