@@ -1,25 +1,22 @@
 """Tier 1 of the PRISM-India pre-test triage pipeline: objective clinical data.
 
 Assesses only routine, objective inputs a clinician already has on hand
-*before* ordering any pharmacogenomic test -- Age, Weight, LFT, RFT/eGFR,
-CBC/platelets, and PT/INR/aPTT -- against published reference thresholds.
+*before* ordering any pharmacogenomic test -- Age, Weight, eGFR, ALT/AST,
+Platelets, and PT/INR -- against exact, published numeric thresholds.
 Subjective inputs (patient-reported history, e.g. a prior ADR or a prior
-treatment failure) are deliberately out of scope: this tier answers "does
-objective, routine clinical data already explain the risk, or point to a
-dose adjustment, without needing genetic testing?"
-
-LFT, RFT/eGFR, and CBC/platelets are collected as coarse Normal / Abnormal /
-Unknown categories (not raw lab values), so this tier deliberately does not
-synthesize a precise severity grade (e.g. a specific KDIGO G-stage) it has no
-numeric data to support -- an "Abnormal" flag names the guideline that
-governs further work-up instead.
+treatment failure) are deliberately out of scope. Any lab the clinician
+marks "Test Not Done / Unknown" is passed through as `None` and never
+raises a risk flag -- absence of data is never treated as evidence of
+abnormality.
 
 Sources:
-    - Renal function: KDIGO 2024 Clinical Practice Guideline for CKD.
+    - Renal function: KDIGO 2024 Clinical Practice Guideline for CKD
+      (eGFR < 60 mL/min/1.73m^2 is the threshold for reduced renal function).
     - Hepatic function: CDSCO / National Formulary of India (NFI), used here
-      for empirical dose-caution framing rather than a formal Child-Pugh
-      score (which needs albumin/ascites/encephalopathy data this prototype
-      does not collect).
+      for empirical dose-caution framing (ALT/AST > 40 U/L, the standard
+      upper limit of normal, flags possible hepatic impairment).
+    - Bleeding risk: routine Coagulation/CBC thresholds (platelets < 150
+      x10^3/uL, PT/INR > 1.2) used before starting an anticoagulant.
     - Age/weight dosing context: FDA guidance on pediatric and weight-based
       dosing.
 """
@@ -28,89 +25,109 @@ KDIGO_SOURCE = "KDIGO 2024"
 NFI_SOURCE = "CDSCO / National Formulary of India"
 FDA_DOSING_SOURCE = "FDA Guidance (Pediatric / Weight-Based Dosing)"
 
-_VALID_CATEGORIES = {"Normal", "Abnormal", "Unknown"}
+EGFR_THRESHOLD = 60.0
+ALT_AST_THRESHOLD = 40.0
+PLATELETS_THRESHOLD = 150.0
+PT_INR_THRESHOLD = 1.2
 
 _PEDIATRIC_AGE_YEARS = 18
 _LOW_WEIGHT_KG = 40.0
-_ABNORMAL_PT_INR_APTT_THRESHOLD = 1.3
 
 
-def _normalize_category(value: str) -> str:
-    """Coerce free-form input to exactly 'Normal', 'Abnormal', or 'Unknown'."""
-    candidate = (value or "Unknown").strip().capitalize()
-    return candidate if candidate in _VALID_CATEGORIES else "Unknown"
+def assess_renal_function(egfr: float = None) -> dict:
+    """Classify renal risk from an exact eGFR value (mL/min/1.73m^2).
 
+    eGFR < 60 meets the KDIGO 2024 threshold for reduced renal function.
+    `egfr=None` (test not done / unknown) never raises risk.
 
-def assess_renal_function(rft_egfr: str = "Unknown") -> dict:
-    """Classify renal risk from a coarse RFT/eGFR category.
-
-    Returns {"rft_egfr", "nephrotoxicity_risk", "detail", "source"}.
+    Returns {"egfr", "nephrotoxicity_risk", "detail", "source"}.
     """
-    category = _normalize_category(rft_egfr)
-    detail = {
-        "Normal": "RFT/eGFR within normal limits",
-        "Abnormal": "Abnormal RFT/eGFR; obtain a precise eGFR for KDIGO 2024 "
-                    "staging and adjust nephrotoxic drug dosing accordingly",
-        "Unknown": "RFT/eGFR not provided",
-    }[category]
-    risk = {"Normal": "LOW", "Abnormal": "HIGH", "Unknown": "UNKNOWN"}[category]
-    return {"rft_egfr": category, "nephrotoxicity_risk": risk, "detail": detail, "source": KDIGO_SOURCE}
-
-
-def assess_hepatic_function(lft: str = "Unknown") -> dict:
-    """Classify hepatic-impairment risk from a coarse LFT category, for
-    empirical dosing caution per the National Formulary of India.
-
-    Returns {"lft", "impairment_risk", "detail", "source"}.
-    """
-    category = _normalize_category(lft)
-    detail = {
-        "Normal": "LFT within normal limits",
-        "Abnormal": "Abnormal LFT; empirical dose caution and closer "
-                    "monitoring required per NFI, independent of genotype",
-        "Unknown": "LFT not provided",
-    }[category]
-    risk = {"Normal": "LOW", "Abnormal": "HIGH", "Unknown": "UNKNOWN"}[category]
-    return {"lft": category, "impairment_risk": risk, "detail": detail, "source": NFI_SOURCE}
-
-
-def _normalize_pt_inr_aptt(pt_inr_aptt) -> str:
-    """Accept either a Normal/Abnormal/Unknown category or a numeric INR-like
-    value and resolve both to a single 'Normal' | 'Abnormal' | 'Unknown'.
-    """
-    if isinstance(pt_inr_aptt, str):
-        candidate = pt_inr_aptt.strip().capitalize()
-        if candidate in _VALID_CATEGORIES:
-            return candidate
-    try:
-        value = float(pt_inr_aptt)
-    except (TypeError, ValueError):
-        return "Unknown"
-    return "Abnormal" if value > _ABNORMAL_PT_INR_APTT_THRESHOLD else "Normal"
-
-
-def assess_bleeding_risk_labs(cbc_platelets: str = "Unknown", pt_inr_aptt=None) -> dict:
-    """Baseline bleeding-risk signal from CBC/platelets (Normal/Abnormal/
-    Unknown) and PT/INR/aPTT (Normal/Abnormal/Unknown, or a raw numeric
-    INR-like value) -- relevant before starting an anticoagulant such as
-    warfarin. Only an explicit "Abnormal" result raises risk; "Unknown"
-    never does, since there is nothing to flag.
-
-    Returns {"cbc_platelets", "pt_inr_aptt", "baseline_bleeding_risk", "flags", "source"}.
-    """
-    cbc_category = _normalize_category(cbc_platelets)
-    pt_category = _normalize_pt_inr_aptt(pt_inr_aptt)
-
-    flags = []
-    if cbc_category == "Abnormal":
-        flags.append("Abnormal CBC/platelets (possible thrombocytopenia or hematologic abnormality)")
-    if pt_category == "Abnormal":
-        flags.append("Abnormal PT/INR/aPTT (elevated baseline bleeding/coagulation risk)")
-
-    risk = "HIGH" if flags else "LOW"
+    if egfr is None:
+        return {
+            "egfr": None,
+            "nephrotoxicity_risk": "UNKNOWN",
+            "detail": "eGFR not provided (test not done / unknown)",
+            "source": KDIGO_SOURCE,
+        }
+    if egfr < EGFR_THRESHOLD:
+        return {
+            "egfr": egfr,
+            "nephrotoxicity_risk": "HIGH",
+            "detail": f"eGFR {egfr} mL/min/1.73m² is below the KDIGO 2024 "
+                      f"threshold of {EGFR_THRESHOLD}; reduced renal function raises "
+                      "nephrotoxicity risk independent of genotype",
+            "source": KDIGO_SOURCE,
+        }
     return {
-        "cbc_platelets": cbc_category,
-        "pt_inr_aptt": pt_category,
+        "egfr": egfr,
+        "nephrotoxicity_risk": "LOW",
+        "detail": f"eGFR {egfr} mL/min/1.73m² is at or above the KDIGO 2024 "
+                  f"threshold of {EGFR_THRESHOLD}",
+        "source": KDIGO_SOURCE,
+    }
+
+
+def assess_hepatic_function(alt_ast: float = None) -> dict:
+    """Classify hepatic-impairment risk from an exact ALT/AST value (U/L),
+    for empirical dosing caution per the National Formulary of India.
+
+    ALT/AST > 40 U/L (the standard upper limit of normal) flags possible
+    impairment. `alt_ast=None` (test not done / unknown) never raises risk.
+
+    Returns {"alt_ast", "impairment_risk", "detail", "source"}.
+    """
+    if alt_ast is None:
+        return {
+            "alt_ast": None,
+            "impairment_risk": "UNKNOWN",
+            "detail": "ALT/AST not provided (test not done / unknown)",
+            "source": NFI_SOURCE,
+        }
+    if alt_ast > ALT_AST_THRESHOLD:
+        return {
+            "alt_ast": alt_ast,
+            "impairment_risk": "HIGH",
+            "detail": f"ALT/AST {alt_ast} U/L exceeds the upper limit of normal "
+                      f"({ALT_AST_THRESHOLD} U/L); empirical dose caution and closer "
+                      "monitoring required per NFI, independent of genotype",
+            "source": NFI_SOURCE,
+        }
+    return {
+        "alt_ast": alt_ast,
+        "impairment_risk": "LOW",
+        "detail": f"ALT/AST {alt_ast} U/L is within normal limits "
+                  f"(threshold: {ALT_AST_THRESHOLD} U/L)",
+        "source": NFI_SOURCE,
+    }
+
+
+def assess_bleeding_risk_labs(platelets: float = None, pt_inr: float = None) -> dict:
+    """Baseline bleeding-risk signal from exact Platelets (x10^3/uL) and
+    PT/INR (ratio) values -- relevant before starting an anticoagulant such
+    as warfarin. Platelets < 150 or PT/INR > 1.2 raises risk; a value of
+    `None` (test not done / unknown) never does.
+
+    Returns {"platelets", "pt_inr", "baseline_bleeding_risk", "flags", "source"}.
+    """
+    flags = []
+    if platelets is not None and platelets < PLATELETS_THRESHOLD:
+        flags.append(
+            f"Thrombocytopenia (platelets {platelets} x10³/µL, "
+            f"below {PLATELETS_THRESHOLD})"
+        )
+    if pt_inr is not None and pt_inr > PT_INR_THRESHOLD:
+        flags.append(f"Elevated PT/INR ({pt_inr}, above {PT_INR_THRESHOLD})")
+
+    if flags:
+        risk = "HIGH"
+    elif platelets is None and pt_inr is None:
+        risk = "UNKNOWN"
+    else:
+        risk = "LOW"
+
+    return {
+        "platelets": platelets,
+        "pt_inr": pt_inr,
         "baseline_bleeding_risk": risk,
         "flags": flags,
         "source": "Routine Coagulation/CBC",

@@ -1,9 +1,9 @@
 """Unit tests for engine.triage (Tier 3: PGx Actionability Triage).
 
-Covers only objective, routine inputs (drug, labs, DDIs, age/weight) --
-there is deliberately no test exercising a "previous ADR" or "previous
-treatment failure" parameter, since triage_pgx_actionability has no such
-parameter to begin with.
+Covers only objective, routine inputs (drug, exact numeric labs, DDIs,
+age/weight) -- there is deliberately no test exercising a "previous ADR" or
+"previous treatment failure" parameter, since triage_pgx_actionability has
+no such parameter to begin with.
 """
 
 import unittest
@@ -29,43 +29,43 @@ class TestTacrolimusTriage(unittest.TestCase):
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
     def test_normal_labs_produce_no_warnings(self):
-        result = triage_pgx_actionability("Tacrolimus", lft="Normal", rft_egfr="Normal")
+        result = triage_pgx_actionability("Tacrolimus", egfr=90, alt_ast=25)
         self.assertEqual(result["warnings"], [])
 
-    def test_abnormal_rft_egfr_triggers_mandatory_tdm_warning(self):
-        result = triage_pgx_actionability("Tacrolimus", rft_egfr="Abnormal")
+    def test_unknown_labs_produce_no_warnings_and_no_crash(self):
+        result = triage_pgx_actionability("Tacrolimus", egfr=None, alt_ast=None)
+        self.assertEqual(result["warnings"], [])
+
+    def test_low_egfr_triggers_mandatory_tdm_warning(self):
+        result = triage_pgx_actionability("Tacrolimus", egfr=35)
         self.assertTrue(any("mandatory" in w.lower() for w in result["warnings"]))
         self.assertTrue(any("KDIGO" in w for w in result["warnings"]))
 
-    def test_abnormal_lft_triggers_mandatory_tdm_warning(self):
-        result = triage_pgx_actionability("Tacrolimus", lft="Abnormal")
+    def test_high_alt_ast_triggers_mandatory_tdm_warning(self):
+        result = triage_pgx_actionability("Tacrolimus", alt_ast=150)
         self.assertTrue(any("mandatory" in w.lower() for w in result["warnings"]))
         self.assertTrue(any("NFI" in w for w in result["warnings"]))
 
     def test_both_abnormal_produce_two_warnings(self):
-        result = triage_pgx_actionability("Tacrolimus", lft="Abnormal", rft_egfr="Abnormal")
+        result = triage_pgx_actionability("Tacrolimus", egfr=35, alt_ast=150)
         self.assertEqual(len(result["warnings"]), 2)
 
 
 class TestWarfarinTriage(unittest.TestCase):
     def test_low_risk_defaults_to_consider(self):
-        result = triage_pgx_actionability("Warfarin", cbc_platelets="Normal", pt_inr_aptt="Normal")
+        result = triage_pgx_actionability("Warfarin", platelets=250, pt_inr=1.0)
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
 
     def test_unknown_labs_do_not_escalate(self):
         result = triage_pgx_actionability("Warfarin")
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
 
-    def test_abnormal_pt_inr_aptt_escalates_to_high_priority(self):
-        result = triage_pgx_actionability("Warfarin", pt_inr_aptt="Abnormal")
+    def test_low_platelets_escalates_to_high_priority(self):
+        result = triage_pgx_actionability("Warfarin", platelets=100)
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
-    def test_numeric_pt_inr_aptt_above_threshold_escalates(self):
-        result = triage_pgx_actionability("Warfarin", pt_inr_aptt=1.6)
-        self.assertEqual(result["triage"], TRIAGE_HIGH)
-
-    def test_abnormal_cbc_platelets_escalates_to_high_priority(self):
-        result = triage_pgx_actionability("Warfarin", cbc_platelets="Abnormal")
+    def test_high_pt_inr_escalates_to_high_priority(self):
+        result = triage_pgx_actionability("Warfarin", pt_inr=1.5)
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
     def test_severe_ddi_amiodarone_escalates_to_high_priority(self):
@@ -91,6 +91,16 @@ class TestAgeWeightContextSurfacesAcrossDrugs(unittest.TestCase):
         result = triage_pgx_actionability("Clopidogrel")
         sources = [f.get("source") for f in result["clinical_findings"]]
         self.assertTrue(any("FDA" in (s or "") for s in sources))
+
+
+class TestNoneValuesNeverCrash(unittest.TestCase):
+    def test_all_none_across_every_drug(self):
+        for drug in ("Clopidogrel", "Tacrolimus", "Warfarin", "Ibuprofen"):
+            result = triage_pgx_actionability(
+                drug, None, age=None, weight=None, egfr=None,
+                alt_ast=None, platelets=None, pt_inr=None,
+            )
+            self.assertIn("triage", result)
 
 
 class TestOutOfScopeDrug(unittest.TestCase):

@@ -15,7 +15,7 @@ from engine.rules import (
 from engine.triage import TRIAGE_CONSIDER, TRIAGE_HIGH, triage_pgx_actionability
 from storage.audit_logger import get_all_logs, log_decision
 
-SOFTWARE_VERSION = "PRISM-India v3.0.0"
+SOFTWARE_VERSION = "PRISM-India v4.0.0"
 
 st.set_page_config(page_title="PRISM-India", page_icon="🧬", layout="centered")
 
@@ -33,13 +33,17 @@ DRUG_OPTIONS = [
     "Rasburicase",
 ]
 
+DIAGNOSTIC_DATA_OPTIONS = [
+    "Genotype Data",
+    "Phenotype / TDM Data",
+    "None of the above (Run Triage)",
+]
+
 VERIFICATION_STATUS_OPTIONS = [
     "Verified",
     "Preliminary / Pending Confirmation",
     "Unverified",
 ]
-
-LAB_CATEGORY_OPTIONS = ["Unknown", "Normal", "Abnormal"]
 
 CYP2C9_OPTIONS = ["*1/*1", "*1/*2", "*1/*3", "*2/*2", "*2/*3", "*3/*3"]
 VKORC1_OPTIONS = ["GG", "AG", "AA"]
@@ -97,9 +101,9 @@ def _render_test_result_input(drug: str, test_type: str):
                 "Test Result",
                 ["Not applicable -- Warfarin genetic dosing uses Genotype only"],
                 disabled=True,
-                help="Routine INR monitoring, not a phenotype rule, governs "
-                     "warfarin's day-to-day titration in this MVP; see the "
-                     "Pre-Test Triage tab.",
+                help="Routine PT/INR monitoring, not a phenotype rule, governs "
+                     "warfarin's day-to-day titration in this MVP; select "
+                     "'None of the above (Run Triage)' above instead.",
             )
             return None
         col_a, col_b = st.columns(2)
@@ -116,7 +120,7 @@ def _render_test_result_input(drug: str, test_type: str):
             ["Not applicable for this drug / test-type combination"],
             disabled=True,
             help="No CPIC rule is defined for this combination; switch "
-                 "Test Data Available above.",
+                 "Diagnostic Data Available above.",
         )
         return None
     if spec["type"] == "select":
@@ -128,61 +132,43 @@ def _render_test_result_input(drug: str, test_type: str):
     return str(value)
 
 
-triage_tab, decision_tab, audit_tab = st.tabs(
-    ["Pre-Test Triage", "Clinical Decision Support", "Audit & Governance Log"]
-)
+def _lab_value_with_unknown_checkbox(label, min_value, max_value, default_value, step, key):
+    """Render a number_input paired with a 'Test Not Done / Unknown' checkbox.
+
+    Returns the numeric value, or None if the checkbox is checked -- the
+    None is what actually reaches the Clinical Engine (the `disabled`
+    number_input keeps its last value internally, but that value is
+    discarded here rather than passed through).
+    """
+    unknown = st.checkbox(f"Test Not Done / Unknown", key=f"{key}_unknown")
+    value = st.number_input(
+        label, min_value=min_value, max_value=max_value, value=default_value,
+        step=step, disabled=unknown, key=f"{key}_value",
+    )
+    return None if unknown else value
+
+
+def _similar_cases_expander(age, drug, extra_context: str = "") -> None:
+    with st.expander("🔍 Web Search: Similar Clinical Cases (Prototype)"):
+        st.info(
+            "**Mockup / Coming Soon** -- this panel does not perform a real "
+            "web or literature search. No external request is made."
+        )
+        st.markdown(
+            f"In a future version, PRISM-India would search medical "
+            f"literature and de-identified case repositories for patient "
+            f"profiles similar to this one -- **age {age}, drug: {drug}**"
+            + (f", {extra_context}" if extra_context else "")
+            + " -- to surface comparable published cases, the pharmacogenomic "
+            "or clinical decisions made, and their reported outcomes."
+        )
+
+
+main_tab, audit_tab = st.tabs(["Clinical Assessment", "Audit & Governance Log"])
 
 with st.sidebar:
-    st.header("Drug Requested")
-    drug = st.selectbox("Drug", DRUG_OPTIONS)
-
-    st.markdown("---")
-    st.header("Pre-Test Clinical Context")
-    st.caption(
-        "Objective, routine data only -- feeds the Clinical Engine and DDI "
-        "Engine (Pre-Test Triage tab). No patient-reported history (e.g. a "
-        "prior ADR or treatment failure) is collected or used here."
-    )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        age = st.number_input("Age (years)", min_value=0, max_value=120, value=40, step=1)
-    with col2:
-        weight = st.number_input("Weight (kg)", min_value=0.0, max_value=250.0, value=70.0, step=0.5)
-
-    lft = st.selectbox("LFT", LAB_CATEGORY_OPTIONS)
-    rft_egfr = st.selectbox("RFT/eGFR", LAB_CATEGORY_OPTIONS)
-    cbc_platelets = st.selectbox("CBC/Platelets", LAB_CATEGORY_OPTIONS)
-
-    pt_inr_aptt_choice = st.selectbox(
-        "PT/INR/aPTT", LAB_CATEGORY_OPTIONS + ["Enter numeric INR value"]
-    )
-    if pt_inr_aptt_choice == "Enter numeric INR value":
-        pt_inr_aptt = st.number_input("INR value", min_value=0.5, max_value=8.0, value=1.0, step=0.1)
-    else:
-        pt_inr_aptt = pt_inr_aptt_choice
-
-    concomitant_drugs_text = st.text_input(
-        "Concomitant Drugs",
-        placeholder="e.g. Omeprazole, Amiodarone",
-        help="Comma-separated. Checked against known severe interactions. "
-             f"Interactions are modeled for: {', '.join(d.title() for d in ALL_INTERACTING_DRUGS)}.",
-    )
-    concurrent_medications = [d.strip() for d in concomitant_drugs_text.split(",") if d.strip()]
-
-    triage_clicked = st.button("Run Pre-Test Triage")
-
-    st.markdown("---")
-    st.header("Patient & Prescription Details")
-    patient_id = st.text_input("Patient ID", placeholder="e.g. PT-1001")
-    test_type_choice = st.radio(
-        "Test Data Available:", ["Genotype Assay", "Phenotype / Clinical Test"]
-    )
-    test_type = "Genotype" if test_type_choice == "Genotype Assay" else "Phenotype"
-    test_result = _render_test_result_input(drug, test_type)
-
-    st.markdown("---")
     st.header("Clinical Encounter Metadata")
+    st.caption("Required to log a decision from the Clinical Assessment tab.")
     clinician_id = st.text_input("Clinician ID", placeholder="e.g. DR-4471")
     institution = st.text_input("Institution", placeholder="e.g. AIIMS Delhi")
     encounter_id = st.text_input("Encounter ID", placeholder="e.g. ENC-20260914-001")
@@ -191,8 +177,6 @@ with st.sidebar:
     result_verification_status = st.selectbox(
         "Result Verification Status", VERIFICATION_STATUS_OPTIONS
     )
-
-    evaluate_clicked = st.button("Evaluate", type="primary")
 
 
 def _metadata_complete() -> bool:
@@ -234,135 +218,180 @@ def _log_and_export(clinician_decision: str, override_reason: str = None) -> Non
     st.success("Decision recorded to audit log")
 
 
-with triage_tab:
-    st.subheader("Pre-Test PGx Actionability Triage")
-    st.caption(
-        "Tier 1 (Clinical Engine: routine labs) and Tier 2 (DDI Engine) combine "
-        "here to answer one question before any genetic test is ordered: is "
-        "PGx testing for this drug actually likely to change this patient's "
-        "management?"
+with main_tab:
+    st.subheader("Patient Baseline")
+    col1, col2 = st.columns(2)
+    with col1:
+        patient_id = st.text_input("Patient ID", placeholder="e.g. PT-1001")
+        weight = st.number_input("Weight (kg)", min_value=0.0, max_value=250.0, value=70.0, step=0.5)
+    with col2:
+        age = st.number_input("Age (years)", min_value=0, max_value=120, value=40, step=1)
+        drug = st.selectbox("Drug Requested", DRUG_OPTIONS)
+
+    concomitant_drugs_text = st.text_input(
+        "Current Medications",
+        placeholder="e.g. Omeprazole, Amiodarone",
+        help="Comma-separated. Checked against known severe interactions. "
+             f"Interactions are modeled for: {', '.join(d.title() for d in ALL_INTERACTING_DRUGS)}.",
     )
+    concurrent_medications = [d.strip() for d in concomitant_drugs_text.split(",") if d.strip()]
 
-    if triage_clicked:
-        st.session_state["triage_result"] = triage_pgx_actionability(
-            drug, concurrent_medications,
-            age=age, weight=weight, lft=lft, rft_egfr=rft_egfr,
-            cbc_platelets=cbc_platelets, pt_inr_aptt=pt_inr_aptt,
-        )
-        st.session_state["triage_drug"] = drug
+    st.markdown("---")
+    diagnostic_data_choice = st.radio("Diagnostic Data Available:", DIAGNOSTIC_DATA_OPTIONS)
+    st.markdown("---")
 
-    triage_result = st.session_state.get("triage_result")
+    if diagnostic_data_choice in ("Genotype Data", "Phenotype / TDM Data"):
+        # Path A: a PGx test result already exists -- go straight to interpretation.
+        test_type = "Genotype" if diagnostic_data_choice == "Genotype Data" else "Phenotype"
 
-    if not triage_result:
-        st.info(
-            "Select a drug, any concurrent medications, and relevant labs in "
-            "the sidebar, then click Run Pre-Test Triage."
-        )
-    else:
-        triage_drug = st.session_state.get("triage_drug", drug)
-        triage_state = triage_result["triage"]
+        st.subheader("Genotype / Phenotype Evaluation")
+        test_result = _render_test_result_input(drug, test_type)
+        evaluate_clicked = st.button("Evaluate", type="primary")
 
-        if triage_state == TRIAGE_HIGH:
-            st.error(f"🔴 HIGH PRIORITY — PGx testing for {triage_drug} is strongly indicated")
-        elif triage_state == TRIAGE_CONSIDER:
-            st.warning(f"🟡 CONSIDER — genetic information for {triage_drug} may influence treatment")
+        if evaluate_clicked:
+            if not patient_id.strip():
+                st.warning("Patient ID is required before evaluating.")
+            else:
+                result = evaluate_prescription(drug, test_type, test_result)
+                st.session_state["result"] = result
+                st.session_state["eval_context"] = {
+                    "patient_id": patient_id.strip(),
+                    "drug": drug,
+                    "test_type": test_type,
+                    "test_result": test_result,
+                    "recommendation_given": result["recommendation_and_dosage"] or result["reason"],
+                }
+                st.session_state["show_override"] = False
+                st.session_state["fhir_bundle"] = None
+
+        result = st.session_state.get("result")
+
+        if not result:
+            st.info("Select a test result above, then click Evaluate.")
         else:
-            st.success(f"🟢 LOW PRIORITY — PGx testing for {triage_drug} is unlikely to change management")
-
-        st.markdown("**Rationale:**")
-        for line in triage_result["rationale"]:
-            st.markdown(f"- {line}")
-
-        if triage_result.get("warnings"):
-            st.markdown("**Lab-Driven Safety Warnings:**")
-            for warning_text in triage_result["warnings"]:
-                st.error(warning_text)
-
-        if triage_result["ddi_findings"]:
-            st.markdown("**Drug-Drug Interaction (DDI Engine) Findings:**")
-            for finding in triage_result["ddi_findings"]:
-                st.warning(
-                    f"**{finding['severity']}** — "
-                    f"{', '.join(m.title() for m in finding['matched_medications'])}: "
-                    f"{finding['mechanism']}\n\n"
-                    f"**Recommendation:** {finding['recommendation']}\n\n"
-                    f"*Source: {finding['source']}*"
+            st.subheader("Decision Support Output")
+            if result["risk"] == RISK_HIGH:
+                st.error(
+                    f"⚠️ HIGH RISK — {result['reason']}\n\n"
+                    f"**Recommended Action & Dosage:** {result['recommendation_and_dosage']}"
                 )
 
-        if triage_result["clinical_findings"]:
-            st.markdown("**Clinical Engine (Routine Labs) Findings:**")
-            st.json(triage_result["clinical_findings"])
+                col_accept, col_override = st.columns(2)
+                with col_accept:
+                    if st.button("Accept"):
+                        _log_and_export("ACCEPTED")
+                with col_override:
+                    if st.button("Override"):
+                        st.session_state["show_override"] = True
 
-with decision_tab:
-    st.subheader("Decision Support Output")
+                if st.session_state.get("show_override"):
+                    justification = st.text_area("Clinical Justification for Override")
+                    if st.button("Submit Override"):
+                        if justification.strip():
+                            _log_and_export("OVERRIDDEN", justification.strip())
+                        else:
+                            st.info("Please provide a justification before submitting the override.")
 
-    if evaluate_clicked:
-        if not patient_id.strip():
-            st.warning("Patient ID is required before evaluating.")
-        else:
-            result = evaluate_prescription(drug, test_type, test_result)
-            st.session_state["result"] = result
-            st.session_state["eval_context"] = {
-                "patient_id": patient_id.strip(),
-                "drug": drug,
-                "test_type": test_type,
-                "test_result": test_result,
-                "recommendation_given": result["recommendation_and_dosage"] or result["reason"],
-            }
-            st.session_state["show_override"] = False
-            st.session_state["fhir_bundle"] = None
-
-    result = st.session_state.get("result")
-
-    if not result:
-        st.info(
-            "Complete the sidebar (Patient ID, drug, test type, test result), "
-            "then click Evaluate."
-        )
-    else:
-        if result["risk"] == RISK_HIGH:
-            st.error(
-                f"⚠️ HIGH RISK — {result['reason']}\n\n"
-                f"**Recommended Action & Dosage:** {result['recommendation_and_dosage']}"
-            )
-
-            col_accept, col_override = st.columns(2)
-            with col_accept:
+            elif result["risk"] == RISK_NO_ALERT:
+                st.success(
+                    f"✅ NO ACTIONABLE ALERT — {result['reason']}\n\n"
+                    f"**Recommended Action & Dosage:** {result['recommendation_and_dosage']}"
+                )
                 if st.button("Accept"):
                     _log_and_export("ACCEPTED")
-            with col_override:
-                if st.button("Override"):
-                    st.session_state["show_override"] = True
 
-            if st.session_state.get("show_override"):
-                justification = st.text_area("Clinical Justification for Override")
-                if st.button("Submit Override"):
-                    if justification.strip():
-                        _log_and_export("OVERRIDDEN", justification.strip())
-                    else:
-                        st.info("Please provide a justification before submitting the override.")
+            else:
+                st.info(result["reason"])
 
-        elif result["risk"] == RISK_NO_ALERT:
-            st.success(
-                f"✅ NO ACTIONABLE ALERT — {result['reason']}\n\n"
-                f"**Recommended Action & Dosage:** {result['recommendation_and_dosage']}"
+            fhir_bundle = st.session_state.get("fhir_bundle")
+            if fhir_bundle:
+                with st.expander("FHIR R4 / ABDM-aligned Interoperability Record"):
+                    st.json(fhir_bundle)
+                    st.download_button(
+                        "Download FHIR Bundle (JSON)",
+                        data=json.dumps(fhir_bundle, indent=2),
+                        file_name=f"fhir_bundle_{st.session_state['eval_context']['patient_id']}.json",
+                        mime="application/json",
+                    )
+
+            _similar_cases_expander(age, drug, extra_context=f"result: {result['risk']}")
+
+    else:
+        # Path B: no PGx result yet -- run the Pre-Test Triage Engine instead.
+        st.subheader("Pre-Test PGx Actionability Triage")
+        st.caption(
+            "No genotype or phenotype data available. Tier 1 (Clinical Engine: "
+            "exact numeric labs) and Tier 2 (DDI Engine) combine here to answer "
+            "one question before any genetic test is ordered: is PGx testing "
+            "for this drug actually likely to change this patient's management?"
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            egfr = _lab_value_with_unknown_checkbox(
+                "eGFR (mL/min/1.73m²)", 0.0, 200.0, 90.0, 1.0, key="egfr"
             )
-            if st.button("Accept"):
-                _log_and_export("ACCEPTED")
+            alt_ast = _lab_value_with_unknown_checkbox(
+                "ALT / AST (U/L)", 0.0, 1000.0, 25.0, 1.0, key="alt_ast"
+            )
+        with col2:
+            platelets = _lab_value_with_unknown_checkbox(
+                "Platelets (x10³/µL)", 0.0, 800.0, 250.0, 5.0, key="platelets"
+            )
+            pt_inr = _lab_value_with_unknown_checkbox(
+                "PT / INR (Ratio)", 0.5, 8.0, 1.0, 0.1, key="pt_inr"
+            )
 
+        triage_clicked = st.button("Run Pre-Test Triage", type="primary")
+
+        if triage_clicked:
+            st.session_state["triage_result"] = triage_pgx_actionability(
+                drug, concurrent_medications,
+                age=age, weight=weight, egfr=egfr, alt_ast=alt_ast,
+                platelets=platelets, pt_inr=pt_inr,
+            )
+            st.session_state["triage_drug"] = drug
+
+        triage_result = st.session_state.get("triage_result")
+
+        if not triage_result:
+            st.info("Enter the available labs above, then click Run Pre-Test Triage.")
         else:
-            st.info(result["reason"])
+            triage_drug = st.session_state.get("triage_drug", drug)
+            triage_state = triage_result["triage"]
 
-        fhir_bundle = st.session_state.get("fhir_bundle")
-        if fhir_bundle:
-            with st.expander("FHIR R4 / ABDM-aligned Interoperability Record"):
-                st.json(fhir_bundle)
-                st.download_button(
-                    "Download FHIR Bundle (JSON)",
-                    data=json.dumps(fhir_bundle, indent=2),
-                    file_name=f"fhir_bundle_{st.session_state['eval_context']['patient_id']}.json",
-                    mime="application/json",
-                )
+            if triage_state == TRIAGE_HIGH:
+                st.error(f"🔴 HIGH PRIORITY — PGx testing for {triage_drug} is strongly indicated")
+            elif triage_state == TRIAGE_CONSIDER:
+                st.warning(f"🟡 CONSIDER — genetic information for {triage_drug} may influence treatment")
+            else:
+                st.success(f"🟢 LOW PRIORITY — PGx testing for {triage_drug} is unlikely to change management")
+
+            st.markdown("**Rationale:**")
+            for line in triage_result["rationale"]:
+                st.markdown(f"- {line}")
+
+            if triage_result.get("warnings"):
+                st.markdown("**Lab-Driven Safety Warnings:**")
+                for warning_text in triage_result["warnings"]:
+                    st.error(warning_text)
+
+            if triage_result["ddi_findings"]:
+                st.markdown("**Drug-Drug Interaction (DDI Engine) Findings:**")
+                for finding in triage_result["ddi_findings"]:
+                    st.warning(
+                        f"**{finding['severity']}** — "
+                        f"{', '.join(m.title() for m in finding['matched_medications'])}: "
+                        f"{finding['mechanism']}\n\n"
+                        f"**Recommendation:** {finding['recommendation']}\n\n"
+                        f"*Source: {finding['source']}*"
+                    )
+
+            if triage_result["clinical_findings"]:
+                st.markdown("**Clinical Engine (Routine Labs) Findings:**")
+                st.json(triage_result["clinical_findings"])
+
+            _similar_cases_expander(age, triage_drug, extra_context=f"triage: {triage_state}")
 
 with audit_tab:
     st.subheader("Audit & Governance Log")

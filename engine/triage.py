@@ -8,12 +8,13 @@ downstream genotype/phenotype -> dosing decision *after* a PGx test result is
 already available -- triage answers "should we test at all," rules.py
 answers "given the test result, what do we do."
 
-The 🔴/🟡/🟢 score is driven strictly by the drug, objective routine lab
-results (LFT, RFT/eGFR, CBC/platelets, PT/INR/aPTT), age/weight, and the DDI
-Engine's findings -- never by subjective patient-reported history (a prior
-adverse drug reaction, a prior treatment failure). That data is real and
-clinically relevant, but it is not the kind of routine, verifiable input this
-triage layer is scoped to reason about.
+The 🔴/🟡/🟢 score is driven strictly by the drug, exact numeric routine lab
+values (eGFR, ALT/AST, Platelets, PT/INR), age/weight, and the DDI Engine's
+findings -- never by subjective patient-reported history (a prior adverse
+drug reaction, a prior treatment failure). That data is real and clinically
+relevant, but it is not the kind of routine, verifiable input this triage
+layer is scoped to reason about. Any lab a clinician marks "Test Not Done /
+Unknown" is passed through as `None` and never raises a risk flag.
 
 Output triage states:
     HIGH PRIORITY   -- testing strongly indicated
@@ -22,6 +23,8 @@ Output triage states:
 """
 
 from engine.clinical import (
+    ALT_AST_THRESHOLD,
+    EGFR_THRESHOLD,
     assess_age_weight_context,
     assess_bleeding_risk_labs,
     assess_hepatic_function,
@@ -58,10 +61,10 @@ def _clopidogrel_triage(concurrent_medications):
     }
 
 
-def _tacrolimus_triage(concurrent_medications, lft="Unknown", rft_egfr="Unknown"):
+def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None):
     ddi_findings = check_drug_interactions("tacrolimus", concurrent_medications)
-    renal = assess_renal_function(rft_egfr)
-    hepatic = assess_hepatic_function(lft)
+    renal = assess_renal_function(egfr)
+    hepatic = assess_hepatic_function(alt_ast)
 
     rationale = [
         "CYP3A5 expresser status changes the tacrolimus starting dose by "
@@ -71,14 +74,15 @@ def _tacrolimus_triage(concurrent_medications, lft="Unknown", rft_egfr="Unknown"
     warnings = []
     if renal["nephrotoxicity_risk"] == "HIGH":
         warnings.append(
-            "Abnormal RFT/eGFR: while PGx sets the starting-dose baseline, "
-            "lab-driven therapeutic drug monitoring (TDM) is mandatory -- "
-            "nephrotoxicity risk per KDIGO 2024."
+            f"eGFR {renal['egfr']} (< {EGFR_THRESHOLD}): while PGx sets the "
+            "starting-dose baseline, lab-driven therapeutic drug monitoring "
+            "(TDM) is mandatory -- nephrotoxicity risk per KDIGO 2024."
         )
     if hepatic["impairment_risk"] == "HIGH":
         warnings.append(
-            "Abnormal LFT: while PGx sets the starting-dose baseline, "
-            "lab-driven TDM and empirical dose caution are mandatory per NFI."
+            f"ALT/AST {hepatic['alt_ast']} U/L (> {ALT_AST_THRESHOLD}): while "
+            "PGx sets the starting-dose baseline, lab-driven TDM and "
+            "empirical dose caution are mandatory per NFI."
         )
     if ddi_findings:
         warnings.append(
@@ -95,9 +99,9 @@ def _tacrolimus_triage(concurrent_medications, lft="Unknown", rft_egfr="Unknown"
     }
 
 
-def _warfarin_triage(concurrent_medications, cbc_platelets="Unknown", pt_inr_aptt=None):
+def _warfarin_triage(concurrent_medications, platelets=None, pt_inr=None):
     ddi_findings = check_drug_interactions("warfarin", concurrent_medications)
-    bleeding_risk = assess_bleeding_risk_labs(cbc_platelets, pt_inr_aptt)
+    bleeding_risk = assess_bleeding_risk_labs(platelets, pt_inr)
 
     severe_ddi = any(finding["severity"] == "MAJOR" for finding in ddi_findings)
     high_baseline_risk = bleeding_risk["baseline_bleeding_risk"] == "HIGH"
@@ -136,26 +140,27 @@ def triage_pgx_actionability(
     *,
     age: float = None,
     weight: float = None,
-    lft: str = "Unknown",
-    rft_egfr: str = "Unknown",
-    cbc_platelets: str = "Unknown",
-    pt_inr_aptt=None,
+    egfr: float = None,
+    alt_ast: float = None,
+    platelets: float = None,
+    pt_inr: float = None,
 ) -> dict:
     """Pre-test triage: should a PGx test even be ordered for this drug?
 
-    All clinical-context parameters are objective, routine inputs: `lft`,
-    `rft_egfr`, and `cbc_platelets` are "Normal"/"Abnormal"/"Unknown";
-    `pt_inr_aptt` is the same, or a raw numeric INR-like value; `age`
-    (years) and `weight` (kg) are numeric. There is no parameter for
-    patient-reported history (e.g. a prior ADR or treatment failure) --
-    this triage layer does not use subjective inputs.
+    All clinical-context parameters are objective, exact numeric routine
+    inputs: `egfr` (mL/min/1.73m^2), `alt_ast` (U/L), `platelets` (x10^3/uL),
+    `pt_inr` (ratio), `age` (years), `weight` (kg). Any of these may be
+    `None` when a clinician marks a test "Not Done / Unknown" -- that never
+    raises a risk flag. There is no parameter for patient-reported history
+    (e.g. a prior ADR or treatment failure) -- this triage layer does not
+    use subjective inputs.
 
     Returns {"triage", "rationale", "warnings", "ddi_findings", "clinical_findings"}.
     `warnings` (distinct from `rationale`) carries strong, lab-driven safety
-    flags -- e.g. Tacrolimus's mandatory-TDM warning on abnormal RFT/LFT.
-    A drug outside this triage layer's MVP scope (Clopidogrel, Tacrolimus,
-    Warfarin) returns LOW PRIORITY with an explanatory rationale, rather than
-    a fabricated assessment.
+    flags -- e.g. Tacrolimus's mandatory-TDM warning on an abnormal eGFR/
+    ALT-AST. A drug outside this triage layer's MVP scope (Clopidogrel,
+    Tacrolimus, Warfarin) returns LOW PRIORITY with an explanatory
+    rationale, rather than a fabricated assessment.
     """
     drug_key = (drug or "").strip().lower()
     age_weight = assess_age_weight_context(age, weight)
@@ -163,9 +168,9 @@ def triage_pgx_actionability(
     if drug_key == "clopidogrel":
         result = _clopidogrel_triage(concurrent_medications)
     elif drug_key == "tacrolimus":
-        result = _tacrolimus_triage(concurrent_medications, lft=lft, rft_egfr=rft_egfr)
+        result = _tacrolimus_triage(concurrent_medications, egfr=egfr, alt_ast=alt_ast)
     elif drug_key == "warfarin":
-        result = _warfarin_triage(concurrent_medications, cbc_platelets=cbc_platelets, pt_inr_aptt=pt_inr_aptt)
+        result = _warfarin_triage(concurrent_medications, platelets=platelets, pt_inr=pt_inr)
     else:
         result = {
             "triage": TRIAGE_LOW,
