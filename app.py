@@ -389,9 +389,9 @@ with tab1:
                     "Primary presenting complaints of GI disorders"
                 )
                 syncope_on_admission = st.checkbox("Syncope on hospital admission")
-                on_antithrombotics = st.checkbox("Antithrombotics")
-                on_diuretics = st.checkbox("Diuretics")
-                on_raas_drugs = st.checkbox("RAAS drugs")
+                antithrombotics = st.checkbox("Antithrombotics")
+                diuretics = st.checkbox("Diuretics")
+                raas_drugs = st.checkbox("RAAS drugs")
         with gerontonet_col:
             with st.container(border=True):
                 st.markdown("**GerontoNet Risk Score**")
@@ -420,15 +420,17 @@ with tab1:
             presenting_bleeding_disorder=presenting_bleeding_disorder,
             presenting_gi_disorder=presenting_gi_disorder,
             syncope_on_admission=syncope_on_admission,
-            on_antithrombotics=on_antithrombotics,
-            on_diuretics=on_diuretics,
-            on_raas_drugs=on_raas_drugs,
+            antithrombotics=antithrombotics,
+            diuretics=diuretics,
+            raas_drugs=raas_drugs,
             num_concurrent_drugs=num_concurrent_drugs,
             heart_failure=heart_failure,
             liver_disease=liver_disease,
             gt4_medical_conditions=gt4_medical_conditions,
             renal_failure=renal_failure,
             previous_adr_history=previous_adr_history,
+            allergy_history=allergy_history,
+            family_history=family_history,
         )
         st.session_state["adr_risk_flag"] = adr_result["adr_risk_flag"]
 

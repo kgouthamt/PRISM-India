@@ -171,15 +171,17 @@ def calculate_adr_risk(
     presenting_bleeding_disorder: bool = False,
     presenting_gi_disorder: bool = False,
     syncope_on_admission: bool = False,
-    on_antithrombotics: bool = False,
-    on_diuretics: bool = False,
-    on_raas_drugs: bool = False,
+    antithrombotics: bool = False,
+    diuretics: bool = False,
+    raas_drugs: bool = False,
     num_concurrent_drugs: int = 0,
     heart_failure: bool = False,
     liver_disease: bool = False,
     gt4_medical_conditions: bool = False,
     renal_failure: bool = False,
     previous_adr_history: bool = False,
+    allergy_history: bool = False,
+    family_history: bool = False,
 ) -> dict:
     """Baseline Adverse Drug Reaction (ADR) risk, from two predictor models
     plus a clinician-reported general clinical history -- entirely
@@ -189,8 +191,8 @@ def calculate_adr_risk(
     predictors implemented):
         age (elderly at or above ELDERLY_AGE_THRESHOLD), chronic_lung_disease,
         presenting_respiratory_disorder, presenting_bleeding_disorder,
-        presenting_gi_disorder, syncope_on_admission, on_antithrombotics,
-        on_diuretics, on_raas_drugs.
+        presenting_gi_disorder, syncope_on_admission, antithrombotics,
+        diuretics, raas_drugs.
 
     GerontoNet ADR risk score (chronic fragility and polypharmacy):
         num_concurrent_drugs, heart_failure, liver_disease,
@@ -198,31 +200,37 @@ def calculate_adr_risk(
 
     General clinical history (clinician-reported):
         previous_adr_history (the strongest single predictor across either
-        model), plus allergy and family history captured for the clinical
-        record but not scored here.
+        model), plus allergy_history and family_history, which together
+        count as a secondary two-predictor group analogous to the ADATIP
+        and GerontoNet groups below.
 
     Returns "High Baseline ADR Risk" if ANY of the following hold:
         - previous_adr_history is True (the strongest single predictor), or
         - num_concurrent_drugs > 4 (polypharmacy), or
         - 2 or more ADATIP predictors are present, or
         - 2 or more of the GerontoNet comorbidity predictors (heart_failure,
-          liver_disease, gt4_medical_conditions, renal_failure) are present.
+          liver_disease, gt4_medical_conditions, renal_failure) are present, or
+        - both allergy_history and family_history are present.
 
     Returns {"high_baseline_adr_risk", "adr_risk_flag", "adatip_trigger_count",
-    "gerontonet_trigger_count", "reasons", "source"}. `adr_risk_flag` is the
-    exact string persisted by storage.audit_logger and rendered in the UI --
-    ADR_RISK_HIGH or ADR_RISK_STANDARD.
+    "gerontonet_trigger_count", "general_history_trigger_count", "reasons",
+    "source"}. `adr_risk_flag` is the exact string persisted by
+    storage.audit_logger and rendered in the UI -- ADR_RISK_HIGH or
+    ADR_RISK_STANDARD.
     """
     adatip_predictors = [
         age is not None and age >= ELDERLY_AGE_THRESHOLD,
         chronic_lung_disease, presenting_respiratory_disorder,
         presenting_bleeding_disorder, presenting_gi_disorder,
-        syncope_on_admission, on_antithrombotics, on_diuretics, on_raas_drugs,
+        syncope_on_admission, antithrombotics, diuretics, raas_drugs,
     ]
     adatip_count = sum(1 for p in adatip_predictors if p)
 
     gerontonet_secondary_predictors = [heart_failure, liver_disease, gt4_medical_conditions, renal_failure]
     gerontonet_secondary_count = sum(1 for p in gerontonet_secondary_predictors if p)
+
+    general_history_secondary_predictors = [allergy_history, family_history]
+    general_history_secondary_count = sum(1 for p in general_history_secondary_predictors if p)
 
     num_concurrent_drugs = num_concurrent_drugs or 0
     polypharmacy = num_concurrent_drugs > POLYPHARMACY_DRUG_THRESHOLD
@@ -242,6 +250,11 @@ def calculate_adr_risk(
             f"{gerontonet_secondary_count} GerontoNet predictors present "
             f"(threshold: {MULTI_PREDICTOR_THRESHOLD})"
         )
+    if general_history_secondary_count >= MULTI_PREDICTOR_THRESHOLD:
+        reasons.append(
+            f"{general_history_secondary_count} General Clinical History predictors "
+            f"present (allergy and family history; threshold: {MULTI_PREDICTOR_THRESHOLD})"
+        )
 
     high_risk = bool(reasons)
     gerontonet_trigger_count = gerontonet_secondary_count + int(previous_adr_history) + int(polypharmacy)
@@ -251,6 +264,7 @@ def calculate_adr_risk(
         "adr_risk_flag": ADR_RISK_HIGH if high_risk else ADR_RISK_STANDARD,
         "adatip_trigger_count": adatip_count,
         "gerontonet_trigger_count": gerontonet_trigger_count,
+        "general_history_trigger_count": general_history_secondary_count,
         "reasons": reasons,
         "source": f"{ADATIP_SOURCE}; {GERONTONET_SOURCE}",
     }

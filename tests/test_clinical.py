@@ -146,7 +146,7 @@ class TestCalculateAdrRisk(unittest.TestCase):
         self.assertEqual(result["adr_risk_flag"], ADR_RISK_STANDARD)
 
     def test_two_adatip_predictors_is_high_risk(self):
-        result = calculate_adr_risk(chronic_lung_disease=True, on_diuretics=True)
+        result = calculate_adr_risk(chronic_lung_disease=True, diuretics=True)
         self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
         self.assertEqual(result["adatip_trigger_count"], 2)
 
@@ -167,6 +167,15 @@ class TestCalculateAdrRisk(unittest.TestCase):
     def test_two_gerontonet_secondary_predictors_is_high_risk(self):
         result = calculate_adr_risk(heart_failure=True, liver_disease=True)
         self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
+
+    def test_allergy_history_alone_is_not_high_risk(self):
+        result = calculate_adr_risk(allergy_history=True)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_STANDARD)
+
+    def test_allergy_and_family_history_together_is_high_risk(self):
+        result = calculate_adr_risk(allergy_history=True, family_history=True)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
+        self.assertEqual(result["general_history_trigger_count"], 2)
 
     def test_reasons_list_is_populated_when_high_risk(self):
         result = calculate_adr_risk(previous_adr_history=True)
