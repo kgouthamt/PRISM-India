@@ -113,8 +113,8 @@ class TestNoneValuesNeverCrash(unittest.TestCase):
                 self.assertIn("triage", result)
 
 
-class TestLayer2AdrRiskAmplification(unittest.TestCase):
-    """Layer 3 amplification: a Layer 2 'High Baseline ADR Risk' flag."""
+class TestClinicalRiskAssessmentAdrAmplification(unittest.TestCase):
+    """PGx Triage amplification: a Clinical Risk Assessment 'High Baseline ADR Risk' flag."""
 
     def test_warfarin_elderly_and_high_adr_risk_escalates_immediately(self):
         # Normal labs, no DDI -- escalation must come purely from age + ADR risk.
@@ -149,12 +149,12 @@ class TestLayer2AdrRiskAmplification(unittest.TestCase):
     def test_clopidogrel_high_adr_risk_surfaces_in_rationale_without_changing_triage(self):
         result = triage_pgx_actionability("Clopidogrel", high_baseline_adr_risk=True)
         self.assertEqual(result["triage"], TRIAGE_HIGH)
-        self.assertTrue(any("Layer 2" in line for line in result["rationale"]))
+        self.assertTrue(any("Clinical Risk Assessment" in line for line in result["rationale"]))
 
     def test_tacrolimus_high_adr_risk_surfaces_in_rationale_without_changing_triage(self):
         result = triage_pgx_actionability("Tacrolimus", high_baseline_adr_risk=True)
         self.assertEqual(result["triage"], TRIAGE_HIGH)
-        self.assertTrue(any("Layer 2" in line for line in result["rationale"]))
+        self.assertTrue(any("Clinical Risk Assessment" in line for line in result["rationale"]))
 
 
 class TestOutOfScopeDrug(unittest.TestCase):

@@ -1,13 +1,11 @@
-"""Tier 1 of the PRISM-India pre-test triage pipeline: objective clinical data.
+"""Objective clinical data assessment for the PRISM-AIIMS pre-test triage pipeline.
 
 Assesses only routine, objective inputs a clinician already has on hand
 *before* ordering any pharmacogenomic test -- Age, Weight, eGFR, ALT/AST,
-Platelets, and PT/INR -- against exact, published numeric thresholds.
-Subjective inputs (patient-reported history, e.g. a prior ADR or a prior
-treatment failure) are deliberately out of scope. Any lab the clinician
-marks "Test Not Done / Unknown" is passed through as `None` and never
-raises a risk flag -- absence of data is never treated as evidence of
-abnormality.
+Platelets, and PT/INR -- against exact, published numeric thresholds. Any
+lab the clinician marks "Test Not Done / Unknown" is passed through as
+`None` and never raises a risk flag -- absence of data is never treated as
+evidence of abnormality.
 
 Sources:
     - Renal function: KDIGO 2024 Clinical Practice Guideline for CKD
@@ -19,18 +17,19 @@ Sources:
       x10^3/uL, PT/INR > 1.2) used before starting an anticoagulant.
     - Age/weight dosing context: FDA guidance on pediatric and weight-based
       dosing.
-    - Baseline ADR risk (Layer 2, calculate_adr_risk): Model A, a 9-predictor
-      institutional ADR risk model (6 of its 9 predictors are implemented in
-      this MVP), and Model B, the published GerontoNet ADR risk score
-      (Onder G, et al. "Development and validation of a score to assess risk
-      of adverse drug reactions among in-hospital patients 65 years or
-      older: the GerontoNet ADR risk score." Arch Intern Med. 2010).
+    - Baseline ADR risk (calculate_adr_risk): the ADATIP 9-Predictor Model,
+      an institutional acute-presentation ADR risk model (all 9 predictors
+      implemented), the published GerontoNet ADR risk score (Onder G, et al.
+      "Development and validation of a score to assess risk of adverse drug
+      reactions among in-hospital patients 65 years or older: the GerontoNet
+      ADR risk score." Arch Intern Med. 2010), and a clinician-reported
+      general clinical history (prior ADR, allergy, family history).
 """
 
 KDIGO_SOURCE = "KDIGO 2024"
 NFI_SOURCE = "CDSCO / National Formulary of India"
 FDA_DOSING_SOURCE = "FDA Guidance (Pediatric / Weight-Based Dosing)"
-MODEL_A_SOURCE = "ADR Risk Predictor Model A (9-predictor institutional model; 6 predictors implemented)"
+ADATIP_SOURCE = "ADATIP 9-Predictor Model (institutional acute-presentation ADR risk model)"
 GERONTONET_SOURCE = "GerontoNet ADR Risk Score (Onder et al., Arch Intern Med 2010)"
 
 EGFR_THRESHOLD = 60.0
@@ -166,49 +165,61 @@ def assess_age_weight_context(age: float = None, weight: float = None) -> dict:
 
 def calculate_adr_risk(
     *,
+    age: float = None,
     chronic_lung_disease: bool = False,
-    bleeding_or_gi_disorder: bool = False,
+    presenting_respiratory_disorder: bool = False,
+    presenting_bleeding_disorder: bool = False,
+    presenting_gi_disorder: bool = False,
     syncope_on_admission: bool = False,
     on_antithrombotics: bool = False,
     on_diuretics: bool = False,
     on_raas_drugs: bool = False,
     num_concurrent_drugs: int = 0,
-    history_of_adr: bool = False,
     heart_failure: bool = False,
     liver_disease: bool = False,
     gt4_medical_conditions: bool = False,
     renal_failure: bool = False,
+    previous_adr_history: bool = False,
 ) -> dict:
-    """Layer 2: baseline Adverse Drug Reaction (ADR) risk, from two
-    predictor models -- entirely independent of any drug being requested or
-    any genotype/phenotype result.
+    """Baseline Adverse Drug Reaction (ADR) risk, from two predictor models
+    plus a clinician-reported general clinical history -- entirely
+    independent of any drug being requested or any genotype/phenotype result.
 
-    Model A (institutional, 9 predictors -- 6 implemented here):
-        chronic_lung_disease, bleeding_or_gi_disorder, syncope_on_admission,
-        on_antithrombotics, on_diuretics, on_raas_drugs.
+    ADATIP 9-Predictor Model (institutional, acute presentation; all 9
+    predictors implemented):
+        age (elderly at or above ELDERLY_AGE_THRESHOLD), chronic_lung_disease,
+        presenting_respiratory_disorder, presenting_bleeding_disorder,
+        presenting_gi_disorder, syncope_on_admission, on_antithrombotics,
+        on_diuretics, on_raas_drugs.
 
-    Model B (GerontoNet ADR risk score, 6 predictors):
-        num_concurrent_drugs, history_of_adr (the strongest single
-        predictor), heart_failure, liver_disease, gt4_medical_conditions,
-        renal_failure.
+    GerontoNet ADR risk score (chronic fragility and polypharmacy):
+        num_concurrent_drugs, heart_failure, liver_disease,
+        gt4_medical_conditions, renal_failure.
+
+    General clinical history (clinician-reported):
+        previous_adr_history (the strongest single predictor across either
+        model), plus allergy and family history captured for the clinical
+        record but not scored here.
 
     Returns "High Baseline ADR Risk" if ANY of the following hold:
-        - history_of_adr is True (the strongest single predictor), or
+        - previous_adr_history is True (the strongest single predictor), or
         - num_concurrent_drugs > 4 (polypharmacy), or
-        - 2 or more Model A predictors are present, or
-        - 2 or more of the other GerontoNet predictors (heart_failure,
+        - 2 or more ADATIP predictors are present, or
+        - 2 or more of the GerontoNet comorbidity predictors (heart_failure,
           liver_disease, gt4_medical_conditions, renal_failure) are present.
 
-    Returns {"high_baseline_adr_risk", "adr_risk_flag", "model_a_trigger_count",
+    Returns {"high_baseline_adr_risk", "adr_risk_flag", "adatip_trigger_count",
     "gerontonet_trigger_count", "reasons", "source"}. `adr_risk_flag` is the
     exact string persisted by storage.audit_logger and rendered in the UI --
     ADR_RISK_HIGH or ADR_RISK_STANDARD.
     """
-    model_a_predictors = [
-        chronic_lung_disease, bleeding_or_gi_disorder, syncope_on_admission,
-        on_antithrombotics, on_diuretics, on_raas_drugs,
+    adatip_predictors = [
+        age is not None and age >= ELDERLY_AGE_THRESHOLD,
+        chronic_lung_disease, presenting_respiratory_disorder,
+        presenting_bleeding_disorder, presenting_gi_disorder,
+        syncope_on_admission, on_antithrombotics, on_diuretics, on_raas_drugs,
     ]
-    model_a_count = sum(1 for p in model_a_predictors if p)
+    adatip_count = sum(1 for p in adatip_predictors if p)
 
     gerontonet_secondary_predictors = [heart_failure, liver_disease, gt4_medical_conditions, renal_failure]
     gerontonet_secondary_count = sum(1 for p in gerontonet_secondary_predictors if p)
@@ -217,15 +228,15 @@ def calculate_adr_risk(
     polypharmacy = num_concurrent_drugs > POLYPHARMACY_DRUG_THRESHOLD
 
     reasons = []
-    if history_of_adr:
-        reasons.append("History of ADR (strongest single predictor, GerontoNet)")
+    if previous_adr_history:
+        reasons.append("Previous ADR history (strongest single predictor)")
     if polypharmacy:
         reasons.append(
             f"Polypharmacy: {num_concurrent_drugs} concurrent drugs "
             f"(> {POLYPHARMACY_DRUG_THRESHOLD})"
         )
-    if model_a_count >= MULTI_PREDICTOR_THRESHOLD:
-        reasons.append(f"{model_a_count} Model A predictors present (threshold: {MULTI_PREDICTOR_THRESHOLD})")
+    if adatip_count >= MULTI_PREDICTOR_THRESHOLD:
+        reasons.append(f"{adatip_count} ADATIP predictors present (threshold: {MULTI_PREDICTOR_THRESHOLD})")
     if gerontonet_secondary_count >= MULTI_PREDICTOR_THRESHOLD:
         reasons.append(
             f"{gerontonet_secondary_count} GerontoNet predictors present "
@@ -233,13 +244,13 @@ def calculate_adr_risk(
         )
 
     high_risk = bool(reasons)
-    gerontonet_trigger_count = gerontonet_secondary_count + int(history_of_adr) + int(polypharmacy)
+    gerontonet_trigger_count = gerontonet_secondary_count + int(previous_adr_history) + int(polypharmacy)
 
     return {
         "high_baseline_adr_risk": high_risk,
         "adr_risk_flag": ADR_RISK_HIGH if high_risk else ADR_RISK_STANDARD,
-        "model_a_trigger_count": model_a_count,
+        "adatip_trigger_count": adatip_count,
         "gerontonet_trigger_count": gerontonet_trigger_count,
         "reasons": reasons,
-        "source": f"{MODEL_A_SOURCE}; {GERONTONET_SOURCE}",
+        "source": f"{ADATIP_SOURCE}; {GERONTONET_SOURCE}",
     }

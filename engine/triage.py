@@ -1,4 +1,5 @@
-"""Tier 3 of the PRISM-India pre-test triage pipeline: PGx Actionability Triage.
+"""PGx Actionability Triage: the pharmacogenomic testing gatekeeper for the
+PRISM-AIIMS pre-test triage pipeline.
 
 Combines the Clinical Engine (engine.clinical) and DDI Engine (engine.ddi)
 outputs into a single pre-test recommendation: is a pharmacogenomic test for
@@ -8,24 +9,26 @@ downstream genotype/phenotype -> dosing decision *after* a PGx test result is
 already available -- triage answers "should we test at all," rules.py
 answers "given the test result, what do we do."
 
-The 🔴/🟡/🟢 score is driven by the drug, exact numeric routine lab values
-(eGFR, ALT/AST, Platelets, PT/INR), age/weight, the DDI Engine's findings,
-and -- as of Layer 2 -- the calculated baseline ADR risk flag from
-engine.clinical.calculate_adr_risk(). It is never driven by raw subjective
-predictor checkboxes themselves (this module never sees "history of ADR" or
-"heart failure" directly): only the single boolean verdict Layer 2 already
-computed crosses into Layer 3, exactly like a lab result crosses in as
-"HIGH"/"LOW"/"UNKNOWN" rather than a raw lab value plus its interpretation
-logic. Any lab a clinician marks "Test Not Done / Unknown" is passed through
-as `None` and never raises a risk flag.
+The HIGH PRIORITY / CONSIDER / LOW PRIORITY recommendation is driven by the
+drug, exact numeric routine lab values (eGFR, ALT/AST, Platelets, PT/INR),
+age/weight, the DDI Engine's findings, and the calculated baseline ADR risk
+flag from engine.clinical.calculate_adr_risk() (the Clinical Risk
+Assessment). It is never driven by raw subjective predictor checkboxes
+themselves (this module never sees "previous ADR history" or "heart
+failure" directly): only the single boolean verdict the Clinical Risk
+Assessment already computed crosses into this triage, exactly like a lab
+result crosses in as "HIGH"/"LOW"/"UNKNOWN" rather than a raw lab value plus
+its interpretation logic. Any lab a clinician marks "Test Not Done /
+Unknown" is passed through as `None` and never raises a risk flag.
 
-For Warfarin specifically, a "High Baseline ADR Risk" flag from Layer 2
-acts as an amplifying factor: combined with an elderly patient (age >= 65,
-matching GerontoNet's own target population), it escalates the triage to
-HIGH PRIORITY immediately, on top of the existing lab/DDI-driven escalation
-conditions. For Clopidogrel and Tacrolimus, which are already always HIGH
-PRIORITY, the same flag is instead surfaced as an additional rationale line,
-since there is no higher triage state to escalate to.
+For Warfarin specifically, a "High Baseline ADR Risk" flag from the
+Clinical Risk Assessment acts as an amplifying factor: combined with an
+elderly patient (age >= 65, matching GerontoNet's own target population),
+it escalates the triage to HIGH PRIORITY immediately, on top of the
+existing lab/DDI-driven escalation conditions. For Clopidogrel and
+Tacrolimus, which are already always HIGH PRIORITY, the same flag is
+instead surfaced as an additional rationale line, since there is no higher
+triage state to escalate to.
 
 Output triage states:
     HIGH PRIORITY   -- testing strongly indicated
@@ -59,7 +62,7 @@ def _clopidogrel_triage(concurrent_medications, high_baseline_adr_risk=False):
     ]
     if high_baseline_adr_risk:
         rationale.append(
-            "Layer 2 flags High Baseline ADR Risk; already at the highest "
+            "The Clinical Risk Assessment flags High Baseline ADR Risk; already at the highest "
             "triage priority, but this warrants extra vigilance when "
             "monitoring for adverse effects."
         )
@@ -91,7 +94,7 @@ def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None, high_bas
     ]
     if high_baseline_adr_risk:
         rationale.append(
-            "Layer 2 flags High Baseline ADR Risk; already at the highest "
+            "The Clinical Risk Assessment flags High Baseline ADR Risk; already at the highest "
             "triage priority, but this warrants extra vigilance when "
             "monitoring for adverse effects."
         )
@@ -150,17 +153,19 @@ def _warfarin_triage(concurrent_medications, platelets=None, pt_inr=None, high_b
         )
     if elderly_high_adr_risk:
         warnings.append(
-            f"Elderly patient (age {age} ≥ {ELDERLY_AGE_THRESHOLD}) with Layer 2 "
-            "High Baseline ADR Risk (GerontoNet): this population is at "
+            f"Elderly patient (age {age} >= {ELDERLY_AGE_THRESHOLD}) with a High "
+            "Baseline ADR Risk flag from the Clinical Risk Assessment "
+            "(GerontoNet-anchored): this population is at "
             "materially higher risk of an adverse drug reaction, and "
             "genotype-guided starting-dose selection is correspondingly "
             "more valuable than routine titration alone."
         )
     elif high_baseline_adr_risk:
         rationale.append(
-            "Layer 2 flags High Baseline ADR Risk, but the patient is not "
-            "elderly (age < 65); this alone does not escalate warfarin "
-            "triage per the GerontoNet-anchored amplification rule."
+            "The Clinical Risk Assessment flags High Baseline ADR Risk, but "
+            "the patient is not elderly (age < 65); this alone does not "
+            "escalate warfarin triage per the GerontoNet-anchored "
+            "amplification rule."
         )
 
     triage = (
@@ -197,17 +202,18 @@ def triage_pgx_actionability(
     `pt_inr` (ratio), `age` (years), `weight` (kg). Any of these may be
     `None` when a clinician marks a test "Not Done / Unknown" -- that never
     raises a risk flag. `high_baseline_adr_risk` is the single boolean
-    verdict already computed by Layer 2's engine.clinical.calculate_adr_risk()
-    -- this function never receives or reasons about the raw subjective
-    predictor checkboxes (history of ADR, heart failure, etc.) behind it.
+    verdict already computed by the Clinical Risk Assessment's
+    engine.clinical.calculate_adr_risk() -- this function never receives or
+    reasons about the raw subjective predictor checkboxes (previous ADR
+    history, heart failure, etc.) behind it.
 
     Returns {"triage", "rationale", "warnings", "ddi_findings", "clinical_findings"}.
     `warnings` (distinct from `rationale`) carries strong, lab-driven safety
     flags -- e.g. Tacrolimus's mandatory-TDM warning on an abnormal eGFR/
     ALT-AST, or Warfarin's elderly+high-ADR-risk escalation warning. A drug
-    outside this triage layer's MVP scope (Clopidogrel, Tacrolimus,
-    Warfarin) returns LOW PRIORITY with an explanatory rationale, rather
-    than a fabricated assessment.
+    outside this triage's MVP scope (Clopidogrel, Tacrolimus, Warfarin)
+    returns LOW PRIORITY with an explanatory rationale, rather than a
+    fabricated assessment.
     """
     drug_key = (drug or "").strip().lower()
     age_weight = assess_age_weight_context(age, weight)

@@ -1,4 +1,4 @@
-"""Unit tests for engine.clinical (Tier 1: exact numeric routine labs)."""
+"""Unit tests for engine.clinical (objective clinical data assessment)."""
 
 import unittest
 
@@ -120,8 +120,8 @@ class TestAgeWeightContext(unittest.TestCase):
 
 
 class TestCalculateAdrRisk(unittest.TestCase):
-    """Layer 2: baseline ADR risk from Model A (9-predictor) and Model B
-    (GerontoNet, 6-predictor)."""
+    """Baseline ADR risk from the ADATIP 9-Predictor Model, the GerontoNet
+    Risk Score, and clinician-reported general clinical history."""
 
     def test_no_predictors_is_standard_risk(self):
         result = calculate_adr_risk()
@@ -129,8 +129,8 @@ class TestCalculateAdrRisk(unittest.TestCase):
         self.assertFalse(result["high_baseline_adr_risk"])
         self.assertEqual(result["reasons"], [])
 
-    def test_history_of_adr_alone_is_high_risk(self):
-        result = calculate_adr_risk(history_of_adr=True)
+    def test_previous_adr_history_alone_is_high_risk(self):
+        result = calculate_adr_risk(previous_adr_history=True)
         self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
 
     def test_polypharmacy_above_threshold_is_high_risk(self):
@@ -141,14 +141,24 @@ class TestCalculateAdrRisk(unittest.TestCase):
         result = calculate_adr_risk(num_concurrent_drugs=POLYPHARMACY_DRUG_THRESHOLD)
         self.assertEqual(result["adr_risk_flag"], ADR_RISK_STANDARD)
 
-    def test_single_model_a_predictor_is_not_high_risk(self):
+    def test_single_adatip_predictor_is_not_high_risk(self):
         result = calculate_adr_risk(chronic_lung_disease=True)
         self.assertEqual(result["adr_risk_flag"], ADR_RISK_STANDARD)
 
-    def test_two_model_a_predictors_is_high_risk(self):
+    def test_two_adatip_predictors_is_high_risk(self):
         result = calculate_adr_risk(chronic_lung_disease=True, on_diuretics=True)
         self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
-        self.assertEqual(result["model_a_trigger_count"], 2)
+        self.assertEqual(result["adatip_trigger_count"], 2)
+
+    def test_elderly_age_counts_as_an_adatip_predictor(self):
+        result = calculate_adr_risk(age=70, chronic_lung_disease=True)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
+        self.assertEqual(result["adatip_trigger_count"], 2)
+
+    def test_non_elderly_age_does_not_count_as_a_predictor(self):
+        result = calculate_adr_risk(age=40, chronic_lung_disease=True)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_STANDARD)
+        self.assertEqual(result["adatip_trigger_count"], 1)
 
     def test_single_gerontonet_secondary_predictor_is_not_high_risk(self):
         result = calculate_adr_risk(heart_failure=True)
@@ -159,12 +169,12 @@ class TestCalculateAdrRisk(unittest.TestCase):
         self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
 
     def test_reasons_list_is_populated_when_high_risk(self):
-        result = calculate_adr_risk(history_of_adr=True)
+        result = calculate_adr_risk(previous_adr_history=True)
         self.assertTrue(len(result["reasons"]) >= 1)
 
     def test_source_cites_both_models(self):
         source = calculate_adr_risk()["source"]
-        self.assertIn("Model A", source)
+        self.assertIn("ADATIP", source)
         self.assertIn("GerontoNet", source)
 
     def test_no_missing_keyword_raises_type_error(self):

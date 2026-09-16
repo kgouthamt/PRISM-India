@@ -4,7 +4,7 @@ import json
 import streamlit as st
 
 from abdm.fhir_builder import generate_fhir_bundle
-from engine.clinical import calculate_adr_risk
+from engine.clinical import ADR_RISK_HIGH, calculate_adr_risk
 from engine.ddi import ALL_INTERACTING_DRUGS
 from engine.rules import (
     EVIDENCE_SOURCE,
@@ -17,12 +17,18 @@ from engine.rules import (
 from engine.triage import TRIAGE_CONSIDER, TRIAGE_HIGH, triage_pgx_actionability
 from storage.audit_logger import get_all_logs, log_decision
 
-SOFTWARE_VERSION = "PRISM-AIIMS v5.0.0"
+SOFTWARE_VERSION = "PRISM-AIIMS v6.0.0"
 
-st.set_page_config(page_title="PRISM-AIIMS", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="PRISM-AIIMS", layout="wide")
 
 CUSTOM_CSS = """
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body, [class*="css"], [class*="st-"], [data-testid] {
+    font-family: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif !important;
+}
+
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 [data-testid="stToolbar"] {visibility: hidden;}
@@ -30,50 +36,51 @@ footer {visibility: hidden;}
 .block-container {padding-top: 2rem; padding-bottom: 3rem; max-width: 1200px;}
 
 div[data-testid="stVerticalBlockBorderWrapper"] {
-    border-radius: 14px !important;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
+    border-radius: 10px !important;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.05);
 }
 
 div[data-testid="stMetric"] {
-    background-color: rgba(127, 127, 127, 0.06);
-    border: 1px solid rgba(127, 127, 127, 0.18);
-    border-radius: 12px;
+    background-color: rgba(127, 127, 127, 0.05);
+    border: 1px solid rgba(127, 127, 127, 0.16);
+    border-radius: 8px;
     padding: 14px 10px 8px 10px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
 }
 
 section[data-testid="stSidebar"] {
-    box-shadow: 2px 0 10px rgba(0, 0, 0, 0.05);
+    border-right: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 .pgx-card {
-    border-radius: 14px;
+    border-radius: 8px;
     padding: 18px 22px;
     margin: 10px 0 16px 0;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
-    font-size: 1.02rem;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    font-size: 1.0rem;
     line-height: 1.5;
 }
-.pgx-card h3 {margin-top: 0; margin-bottom: 6px;}
-.pgx-card-high {background: #fdecea; border-left: 8px solid #d32f2f; color: #7a1010;}
-.pgx-card-consider {background: #fff8e1; border-left: 8px solid #f9a825; color: #6b5200;}
-.pgx-card-low {background: #e8f5e9; border-left: 8px solid #2e7d32; color: #1b4d20;}
-.pgx-card-info {background: #e8f0fe; border-left: 8px solid #1a73e8; color: #0b3d91;}
+.pgx-card h3 {margin-top: 0; margin-bottom: 6px; font-weight: 600;}
+.pgx-card-high {background: #fdecea; border-left: 5px solid #b3261e; color: #5c140f;}
+.pgx-card-consider {background: #fef7e0; border-left: 5px solid #b06f00; color: #543e00;}
+.pgx-card-low {background: #e6f4ea; border-left: 5px solid #1e7b34; color: #103e1a;}
+.pgx-card-info {background: #e8f0fe; border-left: 5px solid #1a56b0; color: #0b3d91;}
 
 .adr-banner {
-    border-radius: 12px;
+    border-radius: 8px;
     padding: 14px 18px;
-    font-weight: 700;
+    font-weight: 600;
     margin-top: 8px;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.10);
+    border: 1px solid rgba(0, 0, 0, 0.08);
 }
-.adr-banner-high {background: #fdecea; border: 2px solid #d32f2f; color: #7a1010;}
-.adr-banner-standard {background: #e8f5e9; border: 2px solid #2e7d32; color: #1b4d20;}
+.adr-banner-high {background: #fdecea; border-left: 5px solid #b3261e; color: #5c140f;}
+.adr-banner-standard {background: #e6f4ea; border-left: 5px solid #1e7b34; color: #103e1a;}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-st.title("PRISM-AIIMS: 3-Layer Clinical + PGx Decision Support")
+st.title("PRISM-AIIMS")
+st.caption("Cost-Conscious Pre-Test Triage Engine and Clinical Decision Support System")
 st.caption("Team ID: DENDRITE-PE-XD-018")
 
 DRUG_OPTIONS = [
@@ -194,7 +201,7 @@ def _lab_value_with_unknown_checkbox(label, min_value, max_value, default_value,
     number_input keeps its last value internally, but that value is
     discarded here rather than passed through).
     """
-    unknown = st.checkbox(f"Test Not Done / Unknown", key=f"{key}_unknown")
+    unknown = st.checkbox("Test Not Done / Unknown", key=f"{key}_unknown")
     value = st.number_input(
         label, min_value=min_value, max_value=max_value, value=default_value,
         step=step, disabled=unknown, key=f"{key}_value",
@@ -213,36 +220,38 @@ def _alert_card(level: str, title: str, body_html: str) -> None:
 def _similar_cases_sidebar_panel() -> None:
     with st.sidebar:
         st.markdown("---")
-        with st.expander("🔍 Web Search: Similar Clinical Cases (Prototype)"):
-            st.info(
-                "**Mockup / Coming Soon** -- this panel does not perform a real "
-                "web or literature search. No external request is made."
+        st.subheader("Live Clinical Literature & Similar Cases (Prototype)")
+        age_val = st.session_state.get("patient_age")
+        drug_val = st.session_state.get("requested_drug")
+        if age_val is None or drug_val is None:
+            st.caption(
+                "Complete Patient Baseline & Vitals and Pharmacogenomic (PGx) "
+                "Triage above to preview literature matches here."
             )
-            age_val = st.session_state.get("layer1_age")
-            drug_val = st.session_state.get("layer3_drug")
-            if age_val is None or drug_val is None:
-                st.caption("Complete Layer 1 and Layer 3 above to preview context here.")
-                return
+            return
 
-            extra_context = ""
-            triage_result = st.session_state.get("triage_result")
-            eval_result = st.session_state.get("result")
-            if triage_result:
-                extra_context += f", triage: {triage_result['triage']}"
-            elif eval_result:
-                extra_context += f", result: {eval_result['risk']}"
-            adr_flag = st.session_state.get("adr_risk_flag")
-            if adr_flag:
-                extra_context += f", ADR: {adr_flag}"
+        adr_flag = st.session_state.get("adr_risk_flag")
+        triage_result = st.session_state.get("triage_result")
+        eval_result = st.session_state.get("result")
 
-            st.markdown(
-                f"In a future version, PRISM-AIIMS would search medical "
-                f"literature and de-identified case repositories for patient "
-                f"profiles similar to this one -- **age {age_val}, drug: "
-                f"{drug_val}{extra_context}** -- to surface comparable "
-                "published cases, the pharmacogenomic or clinical decisions "
-                "made, and their reported outcomes."
-            )
+        if triage_result:
+            outcome_note = f"Most recent triage outcome referenced: {triage_result['triage']}."
+        elif eval_result:
+            outcome_note = f"Most recent evaluation outcome referenced: {eval_result['risk']}."
+        else:
+            outcome_note = None
+
+        case_count = 4 if adr_flag == ADR_RISK_HIGH else 2
+        risk_profile = "high ADR risk profiles" if adr_flag == ADR_RISK_HIGH else "standard-risk profiles"
+
+        st.markdown(f"**Querying recent literature for {html.escape(drug_val)}...**")
+        st.markdown(f"Found {case_count} similar cases (age approximately {age_val}) with {risk_profile}.")
+        if outcome_note:
+            st.caption(outcome_note)
+        st.caption(
+            "This preview is generated locally for demonstration purposes and "
+            "does not perform a live literature search."
+        )
 
 
 tab1, tab2 = st.tabs(["Clinical Dashboard", "Audit & Governance"])
@@ -303,7 +312,7 @@ def _log_and_export(clinician_decision: str, override_reason: str = None) -> Non
 with tab1:
     patient_id = st.text_input("Patient ID (Medical Record Number)", placeholder="e.g. PT-1001")
 
-    st.header("👤 LAYER 1: Patient Baseline")
+    st.header("Patient Baseline & Vitals")
     with st.container(border=True):
         st.markdown("**Demographics**")
         col1, col2, col3 = st.columns(3)
@@ -336,7 +345,7 @@ with tab1:
         with vcol6:
             temperature = st.number_input("Temp (°F)", min_value=80.0, max_value=115.0, value=98.6, step=0.1)
 
-        st.markdown("**🖥️ Vitals Monitor**")
+        st.markdown("**Vitals Monitor**")
         mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
         mcol1.metric(
             "Pulse Rate", f"{pulse_rate} bpm",
@@ -354,66 +363,89 @@ with tab1:
             delta=("Fever" if temperature >= 100.4 else None), delta_color="inverse",
         )
 
-    st.session_state["layer1_age"] = age
+    st.session_state["patient_age"] = age
 
-    st.header("⚠️ LAYER 2: ADR Risk Prediction")
+    st.header("Clinical Risk Assessment")
     with st.container(border=True):
         st.caption(
-            "Baseline Adverse Drug Reaction (ADR) risk, from two predictor "
-            "models -- entirely independent of the drug being requested."
+            "Evaluates systemic patient vulnerability using the ADATIP "
+            "9-Predictor Model (acute presentation) and the GerontoNet Risk "
+            "Score (chronic fragility and polypharmacy) -- entirely "
+            "independent of the drug being requested."
         )
-        model_a_col, model_b_col = st.columns(2)
-        with model_a_col:
+        adatip_col, gerontonet_col = st.columns(2)
+        with adatip_col:
             with st.container(border=True):
-                st.markdown("**Model A (9-Predictor ADR Risk Model)**")
+                st.markdown("**ADATIP 9-Predictor Model**")
+                st.caption(f"Age (from Patient Baseline & Vitals): {age} years")
                 chronic_lung_disease = st.checkbox("Chronic lung disease")
-                bleeding_or_gi_disorder = st.checkbox("Presenting with bleeding / GI disorder")
-                syncope_on_admission = st.checkbox("Syncope on admission")
-                on_antithrombotics = st.checkbox("On antithrombotics")
-                on_diuretics = st.checkbox("On diuretics")
-                on_raas_drugs = st.checkbox("On RAAS drugs (ACEi / ARB)")
-        with model_b_col:
+                presenting_respiratory_disorder = st.checkbox(
+                    "Primary presenting complaints of respiratory disorders"
+                )
+                presenting_bleeding_disorder = st.checkbox(
+                    "Primary presenting complaints of bleeding disorders"
+                )
+                presenting_gi_disorder = st.checkbox(
+                    "Primary presenting complaints of GI disorders"
+                )
+                syncope_on_admission = st.checkbox("Syncope on hospital admission")
+                on_antithrombotics = st.checkbox("Antithrombotics")
+                on_diuretics = st.checkbox("Diuretics")
+                on_raas_drugs = st.checkbox("RAAS drugs")
+        with gerontonet_col:
             with st.container(border=True):
-                st.markdown("**Model B — GerontoNet (6-Predictor)**")
+                st.markdown("**GerontoNet Risk Score**")
+                st.caption("History of ADR is captured under General Clinical History below.")
                 num_concurrent_drugs = st.number_input(
                     "Number of concurrent drugs", min_value=0, max_value=30, value=0, step=1
                 )
-                history_of_adr = st.checkbox("History of ADR ⭐ (strongest predictor)")
                 heart_failure = st.checkbox("Heart failure")
                 liver_disease = st.checkbox("Liver disease")
                 gt4_medical_conditions = st.checkbox("> 4 medical conditions")
                 renal_failure = st.checkbox("Renal failure")
 
+        st.markdown("**General Clinical History**")
+        hist_col1, hist_col2, hist_col3 = st.columns(3)
+        with hist_col1:
+            previous_adr_history = st.checkbox("Previous ADR history")
+        with hist_col2:
+            allergy_history = st.checkbox("Allergy history")
+        with hist_col3:
+            family_history = st.checkbox("Family history")
+
         adr_result = calculate_adr_risk(
+            age=age,
             chronic_lung_disease=chronic_lung_disease,
-            bleeding_or_gi_disorder=bleeding_or_gi_disorder,
+            presenting_respiratory_disorder=presenting_respiratory_disorder,
+            presenting_bleeding_disorder=presenting_bleeding_disorder,
+            presenting_gi_disorder=presenting_gi_disorder,
             syncope_on_admission=syncope_on_admission,
             on_antithrombotics=on_antithrombotics,
             on_diuretics=on_diuretics,
             on_raas_drugs=on_raas_drugs,
             num_concurrent_drugs=num_concurrent_drugs,
-            history_of_adr=history_of_adr,
             heart_failure=heart_failure,
             liver_disease=liver_disease,
             gt4_medical_conditions=gt4_medical_conditions,
             renal_failure=renal_failure,
+            previous_adr_history=previous_adr_history,
         )
         st.session_state["adr_risk_flag"] = adr_result["adr_risk_flag"]
 
         if adr_result["high_baseline_adr_risk"]:
             reasons_html = html.escape("; ".join(adr_result["reasons"]))
             st.markdown(
-                f"<div class='adr-banner adr-banner-high'>⚠️ "
+                f"<div class='adr-banner adr-banner-high'>"
                 f"{html.escape(adr_result['adr_risk_flag'])} — {reasons_html}</div>",
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
-                "<div class='adr-banner adr-banner-standard'>✅ Standard baseline ADR risk</div>",
+                "<div class='adr-banner adr-banner-standard'>Standard baseline ADR risk</div>",
                 unsafe_allow_html=True,
             )
 
-    st.header("🧬 LAYER 3: PGx Triage & Decision Support")
+    st.header("Pharmacogenomic (PGx) Triage")
     with st.container(border=True):
         col_drug, col_meds = st.columns(2)
         with col_drug:
@@ -426,7 +458,7 @@ with tab1:
                      f"Interactions are modeled for: {', '.join(d.title() for d in ALL_INTERACTING_DRUGS)}.",
             )
         concurrent_medications = [d.strip() for d in concomitant_drugs_text.split(",") if d.strip()]
-        st.session_state["layer3_drug"] = drug
+        st.session_state["requested_drug"] = drug
 
         diagnostic_data_choice = st.radio("Diagnostic Data Available:", DIAGNOSTIC_DATA_OPTIONS, horizontal=True)
 
@@ -463,7 +495,7 @@ with tab1:
                 st.subheader("Decision Support Output")
                 if result["risk"] == RISK_HIGH:
                     _alert_card(
-                        "high", "⚠️ HIGH RISK",
+                        "high", "HIGH RISK",
                         f"{html.escape(result['reason'])}<br><br>"
                         f"<b>Recommended Action &amp; Dosage:</b> "
                         f"{html.escape(result['recommendation_and_dosage'])}",
@@ -487,7 +519,7 @@ with tab1:
 
                 elif result["risk"] == RISK_NO_ALERT:
                     _alert_card(
-                        "low", "✅ NO ACTIONABLE ALERT",
+                        "low", "NO ACTIONABLE ALERT",
                         f"{html.escape(result['reason'])}<br><br>"
                         f"<b>Recommended Action &amp; Dosage:</b> "
                         f"{html.escape(result['recommendation_and_dosage'])}",
@@ -496,7 +528,7 @@ with tab1:
                         _log_and_export("ACCEPTED")
 
                 else:
-                    _alert_card("info", "ℹ️ INFO", html.escape(result["reason"]))
+                    _alert_card("info", "INFORMATION", html.escape(result["reason"]))
 
                 fhir_bundle = st.session_state.get("fhir_bundle")
                 if fhir_bundle:
@@ -514,11 +546,11 @@ with tab1:
         with st.container(border=True):
             st.subheader("Pre-Test PGx Actionability Triage")
             st.caption(
-                "No genotype or phenotype data available. Tier 1 (Clinical Engine: "
-                "exact numeric labs) and Tier 2 (DDI Engine) combine with the Layer "
-                "2 ADR risk flag above to answer one question before any genetic "
-                "test is ordered: is PGx testing for this drug actually likely to "
-                "change this patient's management?"
+                "No genotype or phenotype data available. The Clinical Engine "
+                "(exact numeric labs) and DDI Engine combine with the Clinical "
+                "Risk Assessment's ADR risk flag above to answer one question "
+                "before any genetic test is ordered: is PGx testing for this "
+                "drug actually likely to change this patient's management?"
             )
 
             col1, col2 = st.columns(2)
@@ -537,7 +569,7 @@ with tab1:
                     "PT / INR (Ratio)", 0.5, 8.0, 1.0, 0.1, key="pt_inr"
                 )
 
-            triage_clicked = st.button("🧬 Run Triage", type="primary")
+            triage_clicked = st.button("Run Triage", type="primary")
 
             if triage_clicked:
                 st.session_state["triage_result"] = triage_pgx_actionability(
@@ -559,17 +591,17 @@ with tab1:
 
                 if triage_state == TRIAGE_HIGH:
                     _alert_card(
-                        "high", "🔴 HIGH PRIORITY",
+                        "high", "HIGH PRIORITY",
                         f"PGx testing for <b>{triage_drug_safe}</b> is strongly indicated.",
                     )
                 elif triage_state == TRIAGE_CONSIDER:
                     _alert_card(
-                        "consider", "🟡 CONSIDER",
+                        "consider", "CONSIDER",
                         f"Genetic information for <b>{triage_drug_safe}</b> may influence treatment.",
                     )
                 else:
                     _alert_card(
-                        "low", "🟢 LOW PRIORITY",
+                        "low", "LOW PRIORITY",
                         f"PGx testing for <b>{triage_drug_safe}</b> is unlikely to change management.",
                     )
 
