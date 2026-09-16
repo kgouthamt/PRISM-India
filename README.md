@@ -319,6 +319,15 @@ python -m unittest discover -s tests -t . -v
 
 This exits 0 with `OK` when the suite passes, using only the Python standard library.
 
+### End-to-end integration suite
+
+`tests/test_final_integration.py` is a separate `pytest`-based suite written for PRISM-AIIMS's stability code freeze: it drives the full Layer 2 (`calculate_adr_risk`) → Layer 3 (`triage_pgx_actionability`) pipeline through seven extreme patient profiles in one pass each -- a healthy baseline, a GerontoNet-score escalation, an ADATIP-driven escalation, a DDI collision, combined renal/hepatic lab warnings, a fully blank clinician submission (`None` labs and medications), and an out-of-scope drug -- specifically hunting for `TypeError`/`KeyError`/logic-routing regressions rather than testing new behavior. It requires `pytest` (`pip install -r requirements-dev.txt`), which is deliberately kept out of the production `requirements.txt` used by the Docker image:
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/test_final_integration.py -v
+```
+
 ---
 
 ## Project Structure
