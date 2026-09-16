@@ -11,20 +11,31 @@ PRISM-AIIMS is not a post-test genotype lookup dictionary — a tool that sits i
 PRISM-AIIMS is a **Cost-Conscious Pre-Test Triage Engine and Clinical Decision Support System**. Every encounter flows through three sequential stages, each narrowing the question further:
 
 1. **Patient Baseline & Vitals** — captures objective physiological data (demographics, anthropometrics, vitals, and later, exact numeric labs such as eGFR and INR) anchored to published clinical guidelines (KDIGO, NFI).
-2. **Clinical Risk Assessment** — evaluates systemic patient vulnerability using the ADATIP 9-Predictor Model (acute presentation) and the GerontoNet Risk Score (chronic fragility and polypharmacy), producing a single verdict: Standard or High Baseline ADR Risk.
+2. **Clinical Risk Assessment** — evaluates systemic patient vulnerability using the ADATIP 9-Predictor Model (acute presentation) and the **actual, validated GerontoNet ADR Risk Score** (chronic fragility and polypharmacy), producing a single verdict: Standard or High Baseline ADR Risk.
 3. **Pharmacogenomic (PGx) Triage** — acts as the financial and clinical gatekeeper, combining the drug being requested, routine labs, drug-drug interactions, and the risk flag from the previous stage into a deterministic testing recommendation: HIGH PRIORITY, CONSIDER, or LOW PRIORITY.
 
 The pivot is deliberate: **baseline risk comes first, drug-specific triage comes second, genotype interpretation comes third.** Only once PGx Triage says testing is worthwhile does the system's fourth role — genotype/phenotype-to-dosing recommendation (`engine/rules.py`) — become relevant.
+
+### This revision: corrections from clinical reviewer feedback
+
+An earlier revision of this prototype had accumulated several clinical oversimplifications flagged by medical reviewers. This revision corrects them:
+
+- **Lab abnormalities no longer masquerade as diagnoses.** A reduced eGFR is no longer reported as "universally high nephrotoxicity risk"; an elevated ALT/AST is no longer reported as "hepatic impairment"; abnormal platelets/PT-INR are no longer reported as "universally high bleeding risk." Each is now reported as exactly what it is — a lab abnormality requiring clinical correlation — never an automatic diagnosis. See Section 2.
+- **The GerontoNet ADR Risk Score is now the actual, published, weighted score** (0-10 points, High Risk only at 4+), not a derived "2-or-more-predictors" binary heuristic. See Section 3.
+- **General ADR risk and PGx actionability are two distinct, separately reported outputs.** A patient's baseline ADR risk makes them generally fragile, but that alone does not mean a given drug's genetic risk is amplified by it — the two concepts are never conflated into one field. See Section 4.
+- **Tacrolimus TDM targets are now indication-aware** (Kidney vs. Liver Transplant), and **G6PD phenotype interpretation is now reference-range aware** (the ordering lab's own lower limit of normal, not a single universal cutoff). See Section 3.
+- **The DDI database is explicitly labeled as a curated MVP subset**, not a comprehensive interaction checker.
+- **There is no single blanket "CPIC" label** describing every rule in the engine. Each individual rule now carries its own `guideline_url`, `evidence_date`, and a short `rule_hash` fingerprint, surfaced on every evaluation. See Section 6.
 
 ### The Workflow
 
 The dashboard follows this exact sequence on one screen, top to bottom:
 
 1. **Patient ID**, then **Patient Baseline & Vitals** — Demographics (Name, Age, Address), Anthropometrics (Height, Weight), and Vitals (Pulse Rate, Blood Pressure, Respiratory Rate, SpO2, Temperature), collected before anything else.
-2. **Clinical Risk Assessment** — checkboxes and numeric inputs for the ADATIP 9-Predictor Model, the GerontoNet Risk Score, and a General Clinical History section, evaluated reactively the moment they're filled in, surfacing a single "Standard" or "High Baseline ADR Risk" verdict.
-3. **Pharmacogenomic (PGx) Triage** — the drug being requested and any current medications, followed by a routing question, "Diagnostic Data Available:", with three answers: Genotype Data, Phenotype / TDM Data, or None of the above (Run Triage).
-   - **Path A — Genotype/Phenotype Evaluation.** If a PGx result already exists, the dashboard goes straight to interpreting it: the exact test result, an Evaluate action, and the full risk/dosage/audit/FHIR flow (`engine/rules.py`).
-   - **Path B — Numerical Pre-Test Triage.** If no PGx result exists yet, the dashboard instead collects exact numeric labs (eGFR, ALT/AST, Platelets, PT/INR — each with a "Test Not Done / Unknown" checkbox) and runs `triage_pgx_actionability()`, fed by the Clinical Risk Assessment's ADR risk verdict, to decide whether ordering a test is even worthwhile.
+2. **Clinical Risk Assessment** — checkboxes and numeric inputs for the ADATIP 9-Predictor Model, the actual GerontoNet Risk Score, and a General Clinical History section, evaluated reactively the moment they're filled in, surfacing the exact numerical GerontoNet score, its risk category, and a single overall "Standard" or "High Baseline ADR Risk" verdict.
+3. **Pharmacogenomic (PGx) Triage** — the drug being requested and any current medications (with a disclaimer that the DDI database is a curated MVP subset), followed by a routing question, "Diagnostic Data Available:", with three answers: Genotype Data, Phenotype / TDM Data, or None of the above (Run Triage).
+   - **Path A — Genotype/Phenotype Evaluation.** If a PGx result already exists, the dashboard goes straight to interpreting it: the exact test result, drug-specific clinical-context inputs (Tacrolimus's transplant indication; G6PD's local lab reference range), an Evaluate action, and the full risk/dosage/audit/FHIR flow (`engine/rules.py`) — including that specific rule's own provenance.
+   - **Path B — Numerical Pre-Test Triage.** If no PGx result exists yet, the dashboard instead collects exact numeric labs (eGFR, ALT/AST, Platelets, PT/INR — each with a "Test Not Done / Unknown" checkbox) and runs `triage_pgx_actionability()`, fed by the Clinical Risk Assessment's ADR risk verdict, to decide whether ordering a test is even worthwhile — reporting PGx actionability and general ADR risk as two separate sections.
 
 The sidebar carries a permanent "Live Clinical Literature & Similar Cases" panel — a UI prototype, clearly labeled and non-functional, previewing a planned literature-search feature (see "Similar Cases Preview" below).
 
@@ -40,18 +51,18 @@ Objective intake data, collected before any risk scoring runs:
 | Anthropometrics | Height (cm), Weight (kg) |
 | Vitals | Pulse Rate, Blood Pressure (systolic/diastolic), Respiratory Rate, SpO2, Temperature |
 
-Age and Weight feed forward into the Clinical Risk Assessment (the ADATIP age predictor, described below) and into `assess_age_weight_context()` (pediatric/low-body-weight dosing flags, FDA-anchored). For Warfarin specifically, Age also feeds the PGx Triage amplification rule described in Section 4. The remaining vitals are collected for the clinical record but are not yet consumed by the rule engine — a scope decision that keeps this system's logic traceable to the exact inputs it reasons about, rather than implying a vitals-driven risk model that doesn't exist yet.
+Age and Weight feed forward into the Clinical Risk Assessment (the ADATIP age predictor, described below) and into `assess_age_weight_context()` (pediatric/low-body-weight dosing flags, FDA-anchored). For Warfarin specifically, Age also feeds the PGx Triage amplification rule described in Section 4.
 
-Later, in Path B of PGx Triage, this stage extends to exact numeric routine labs — eGFR, ALT/AST, Platelets, and PT/INR — each anchored to a named guideline:
+Later, in Path B of PGx Triage, this stage extends to exact numeric routine labs — eGFR, ALT/AST, Platelets, and PT/INR — each anchored to a named guideline. **Per clinical reviewer feedback, each of these is now reported strictly as a lab abnormality requiring clinical correlation, never as an automatic diagnosis:**
 
-| Parameter | Unit | Threshold |
-|-----------|------|-----------|
-| eGFR | mL/min/1.73m² | < 60 flags renal risk (KDIGO 2024) |
-| ALT/AST | U/L | > 40 flags hepatic risk (CDSCO / National Formulary of India) |
-| Platelets | x10³/µL | < 150 flags bleeding risk |
-| PT/INR | ratio | > 1.2 flags bleeding risk |
+| Parameter | Unit | Threshold | Reported as |
+|-----------|------|-----------|-------------|
+| eGFR | mL/min/1.73m² | < 60 (KDIGO 2024) | "Reduced eGFR; requires clinical correlation for renal dose adjustment." |
+| ALT/AST | U/L | > 40 (CDSCO / National Formulary of India) | "Elevated transaminases; laboratory abnormality." |
+| Platelets | x10³/µL | < 150 | "Abnormal coagulation/CBC parameters." |
+| PT/INR | ratio | > 1.2 | "Abnormal coagulation/CBC parameters." |
 
-Checking a lab's "Test Not Done / Unknown" box passes `None` for that parameter rather than whatever value is left in the disabled input field — a skipped test is never silently treated as a normal result.
+The functions that compute these (`assess_renal_function`, `assess_hepatic_function`, `assess_bleeding_risk_labs` in `engine/clinical.py`) return a `renal_function_status` (REDUCED/NORMAL/UNKNOWN), `transaminase_status` (ELEVATED/NORMAL/UNKNOWN), and `coagulation_cbc_status` (ABNORMAL/NORMAL/UNKNOWN) respectively — deliberately neutral status names, not risk-magnitude judgments like the old "nephrotoxicity risk" or "bleeding risk" labels. Checking a lab's "Test Not Done / Unknown" box passes `None` for that parameter rather than whatever value is left in the disabled input field — a skipped test is never silently treated as a normal result.
 
 ---
 
@@ -61,7 +72,7 @@ Checking a lab's "Test Not Done / Unknown" box passes `None` for that parameter 
 
 ### ADATIP 9-Predictor Model (acute presentation)
 
-An institutional model capturing acute-presentation risk factors, all 9 predictors implemented:
+An institutional model capturing acute-presentation risk factors, all 9 predictors implemented. No published point-weighted formula was available for this model, so it uses a "2 or more predictors present" heuristic:
 
 | Predictor | Type |
 |-----------|------|
@@ -75,38 +86,43 @@ An institutional model capturing acute-presentation risk factors, all 9 predicto
 | Diuretics | checkbox |
 | RAAS drugs | checkbox |
 
-### GerontoNet Risk Score (chronic fragility and polypharmacy)
+### GerontoNet ADR Risk Score — the actual validated score
 
 Published clinical score: Onder G, et al. "Development and validation of a score to assess risk of adverse drug reactions among in-hospital patients 65 years or older: the GerontoNet ADR risk score." Arch Intern Med. 2010.
 
-| Predictor | Type |
-|-----------|------|
-| Number of concurrent drugs | numeric input |
-| Heart failure | checkbox |
-| Liver disease | checkbox |
-| \>4 medical conditions | checkbox |
-| Renal failure | checkbox |
+**This is no longer a derived binary heuristic.** `calculate_gerontonet_score()` computes the real weighted point total (0-10):
 
-### General Clinical History
+| Criterion | Points |
+|-----------|--------|
+| ≥ 4 comorbid conditions | +1 |
+| Heart failure | +1 |
+| Liver disease | +1 |
+| Renal failure | +1 |
+| 5-7 concurrent drugs | +1 |
+| ≥ 8 concurrent drugs | +4 (supersedes the 5-7 band) |
+| Previous history of ADR | +2 |
 
-A clinician-reported section capturing prior history that sits above either predictor model:
+The result is classified **High Risk only if the total score is 4 or more** — otherwise Low Risk. This is a meaningful behavior change from the prior heuristic: a single strong predictor (e.g. Previous ADR history alone, worth 2 points) is **not**, on its own, enough to reach High Risk under the real score, even though it is still the single largest point contributor. The dashboard displays the exact numerical score and its risk category as its own metric, separate from the overall composite ADR verdict.
+
+### General clinical history (clinician-reported)
+
+A dedicated section capturing history that sits above either predictor model:
 
 | Field | Effect |
 |-------|--------|
-| Previous ADR history | the single strongest predictor across either model — checking this alone immediately triggers High Baseline ADR Risk |
-| Allergy history | recorded for the clinical record |
-| Family history | recorded for the clinical record |
+| Previous ADR history | feeds the GerontoNet score above (+2 points); also the model's single largest point contributor |
+| Allergy history | contributes to a 2-of-2 secondary heuristic with Family history (no published weighting exists for these) |
+| Family history | contributes to the same 2-of-2 secondary heuristic |
 
-### Trigger logic
+### Composite trigger logic
 
 `calculate_adr_risk()` returns **High Baseline ADR Risk** if **any** of the following hold, otherwise **Standard**:
 
-- Previous ADR history is checked (the strongest single predictor, on its own), **or**
-- the number of concurrent drugs is greater than 4 (polypharmacy; exactly 4 does **not** trigger — the threshold is strictly "more than 4"), **or**
+- the GerontoNet ADR Risk Score is High Risk (total score ≥ 4 — see above), **or**
 - **2 or more** ADATIP predictors are present, **or**
-- **2 or more** of the GerontoNet comorbidity predictors (heart failure, liver disease, >4 medical conditions, renal failure) are present.
+- **both** Allergy history and Family history are present.
 
-The result dict — `{"high_baseline_adr_risk", "adr_risk_flag", "adatip_trigger_count", "gerontonet_trigger_count", "reasons", "source"}` — is what actually crosses into PGx Triage and the audit log.
+The result dict — `{"high_baseline_adr_risk", "adr_risk_flag", "adatip_trigger_count", "gerontonet_score", "general_history_trigger_count", "reasons", "source"}` — is what actually crosses into PGx Triage and the audit log. `gerontonet_score` is itself a full sub-dict: `{"total_score", "max_score", "risk_category", "breakdown", "source"}`.
 
 ---
 
@@ -114,13 +130,20 @@ The result dict — `{"high_baseline_adr_risk", "adr_risk_flag", "adatip_trigger
 
 `triage_pgx_actionability()` (`engine/triage.py`) is the financial and clinical gatekeeper: given a drug, routine labs, drug-drug interactions, and the Clinical Risk Assessment's ADR risk flag, it decides whether a pharmacogenomic test is actually likely to change management for this patient — before any genetic result exists.
 
-### Inputs and outputs
+### General ADR risk vs. PGx actionability: two distinct outputs
 
-- **Objective labs** — `age`, `weight`, `egfr` (KDIGO 2024, < 60 flags renal risk), `alt_ast` (CDSCO/NFI, > 40 flags hepatic risk), `platelets` (< 150 flags bleeding risk), `pt_inr` (> 1.2 flags bleeding risk). Any lab marked "Test Not Done / Unknown" passes `None` and never raises a flag.
-- **Drug-drug interactions** — `check_drug_interactions(drug, concurrent_medications)` checks the patient's current medication list against a curated table of clinically significant interactions.
-- **Clinical Risk Assessment verdict** — the single `high_baseline_adr_risk` boolean from Section 3, used as an amplifying factor (see below).
+Per clinical reviewer feedback, a high baseline ADR risk makes a patient generally **fragile** — but that alone does not mean a given drug's **genetic** risk is amplified by it. These are now reported as two structurally separate fields, never conflated:
 
-Output states:
+- **`triage` / `rationale` / `warnings`** — purely about whether *this drug's* genetic risk is actionable: driven only by labs, DDIs, and (for Warfarin specifically) an amplification rule tied to the genetic danger itself.
+- **`general_adr_risk`** — `{"high_baseline_adr_risk", "amplifies_pgx_triage", "note"}`: the patient's baseline ADR risk status and whether it specifically amplified *this drug's* triage priority, reported independently so a clinician never has to guess which effect is which.
+
+### Outputs and labs
+
+- **Objective labs** — `age`, `weight`, `egfr` (KDIGO 2024, < 60 flags a lab abnormality), `alt_ast` (CDSCO/NFI, > 40 flags a lab abnormality), `platelets` (< 150 flags a lab abnormality), `pt_inr` (> 1.2 flags a lab abnormality). None of these is treated as a diagnosis (see Section 2). Any lab marked "Test Not Done / Unknown" passes `None` and never raises a flag.
+- **Drug-drug interactions** — `check_drug_interactions(drug, concurrent_medications)` checks the patient's current medication list against a curated table of clinically significant interactions. **This DDI database is a curated MVP subset, not a comprehensive interaction checker** — the dashboard states this explicitly next to the medication input.
+- **Clinical Risk Assessment verdict** — the single `high_baseline_adr_risk` boolean from Section 3, used as an amplifying factor for Warfarin only (see below).
+
+Triage states:
 
 | State | Meaning |
 |-------|---------|
@@ -130,65 +153,97 @@ Output states:
 
 This triage runs whenever "None of the above (Run Triage)" is selected, entirely independent of `engine/rules.py` (the downstream genotype/phenotype-to-dosing engine, used instead when Genotype or Phenotype data is selected): PGx Triage answers "should we test?", `evaluate_prescription()` answers "given the result, what do we do?"
 
-### The Clinical Risk Assessment as an amplifying factor
+### Warfarin: the one drug where general ADR risk amplifies PGx actionability
 
-**Warfarin** is the drug where the Clinical Risk Assessment verdict can change the triage outcome outright. `_warfarin_triage()` computes `is_elderly = age >= 65` and escalates straight to HIGH PRIORITY whenever High Baseline ADR Risk and elderly are both true — on top of the existing lab/DDI escalation conditions (PT/INR > 1.2, platelets < 150, or a severe DDI such as amiodarone/an NSAID). This mirrors GerontoNet's own target population (in-hospital patients 65 or older): an elderly patient already flagged as high ADR risk is the population where genotype-guided starting-dose selection is most valuable, so the triage escalates immediately regardless of labs. A missing `age` never escalates (it's treated as "not confirmed elderly," not "assume elderly"), and a high ADR-risk flag on a non-elderly patient is surfaced only as an explanatory rationale line, not an escalation.
+`_warfarin_triage()` computes `is_elderly = age >= 65` and escalates straight to HIGH PRIORITY whenever High Baseline ADR Risk and elderly are both true — on top of the existing lab/DDI escalation conditions (PT/INR > 1.2, platelets < 150, or a severe DDI such as amiodarone/an NSAID). This mirrors GerontoNet's own target population (in-hospital patients 65 or older): an elderly patient already flagged as high ADR risk is at materially higher risk of an adverse drug reaction from genotype-driven over-anticoagulation *specifically*, so genotype-guided starting-dose selection is more valuable. A missing `age` never escalates (it's treated as "not confirmed elderly," not "assume elderly"), and a high ADR-risk flag on a non-elderly patient never amplifies Warfarin's triage — that case is only reported via `general_adr_risk`.
 
-**Clopidogrel and Tacrolimus** are already always HIGH PRIORITY (CYP2C19/CYP3A5 status is directly actionable regardless of routine labs), so there's no higher triage state to escalate to. For these two, a High Baseline ADR Risk verdict instead appends an extra rationale line noting that the case warrants additional vigilance when monitoring for adverse effects — the amplifying factor is preserved as clinical signal even at the triage ceiling.
-
-The result dict separates two kinds of output: `rationale` explains why the triage level was chosen, while a distinct `warnings` list carries strong, safety-relevant alerts — e.g. Tacrolimus's mandatory-TDM warning on an abnormal eGFR/ALT-AST, or Warfarin's elderly + high-ADR-risk escalation warning — rendered in the dashboard as their own alert block beneath the rationale bullets.
+**Clopidogrel and Tacrolimus** are already always HIGH PRIORITY (CYP2C19/CYP3A5 status is directly actionable regardless of routine labs), so general ADR risk never amplifies their triage — there is no higher state, and general fragility does not by itself change either drug's genetic actionability. It is only surfaced via `general_adr_risk` as a monitoring consideration, never folded into `rationale`.
 
 ---
 
-## 5. Evidence-Based Clinical Anchors
+## 5. Clinical Context Variables
+
+Two drug-specific inputs refine (but never replace) the underlying genotype/phenotype rule, added per clinical reviewer feedback that a single fixed threshold does not fit every clinical context:
+
+### Tacrolimus: indication-aware TDM targets
+
+The trough-level therapeutic drug monitoring (TDM) alert now depends on the selected **Indication / Clinical Context** (Kidney Transplant, Liver Transplant, or Other / Unspecified):
+
+| Indication | Target trough range |
+|------------|---------------------|
+| Kidney Transplant | 5.0-15.0 ng/mL |
+| Liver Transplant | 5.0-20.0 ng/mL |
+| Unspecified | falls back to the Kidney Transplant range, rather than silently assuming a single universal target |
+
+### G6PD (Primaquine / Rasburicase): reference-range-aware phenotype interpretation
+
+G6PD enzyme-activity assays are not standardized across laboratories. The dashboard now accepts a **Local Laboratory Reference Range — Lower Limit of Normal (%)** input for the phenotype path; the deficiency cutoff uses that lab-specific value when supplied, falling back to a documented MVP default (10%) only when it is omitted.
+
+---
+
+## 6. Rule Provenance & Versioning
+
+Per clinical reviewer feedback, `engine/rules.py` no longer asserts a single blanket "CPIC" label for every rule in the engine — not every rule traces to a CPIC guideline (the G6PD phenotype cutoff and the Tacrolimus TDM target ranges, for example, come from other sources). Instead, every matched rule carries its own granular provenance, defined in `RULE_PROVENANCE` and surfaced on every `evaluate_prescription()` call:
+
+- `guideline_url` — a link to the specific guideline this rule was drawn from
+- `evidence_date` — that guideline's publication date
+- `rule_hash` — a short MD5 fingerprint of the rule's key, reasoning text, and recommendation, giving each individual evaluation its own lightweight version marker that changes whenever the rule's content changes
+
+An unmatched evaluation (e.g. an unrecognized genotype) returns `None` for all three rather than fabricating provenance. The dashboard displays this per-rule provenance beneath the Decision Support Output, and the audit log records it in place of the old whole-engine constants whenever a specific rule was matched.
+
+---
+
+## 7. Evidence-Based Clinical Anchors
 
 Every threshold and recommendation in the pipeline is traceable to a named, published source — nothing is inferred or fabricated:
 
 | Guideline / Model | Used for |
 |-----------|----------|
-| KDIGO 2024 | Renal function (eGFR) staging and nephrotoxicity risk classification. |
-| CDSCO / National Formulary of India (NFI) | Hepatic impairment framing and empirical dosing caution when genetic data alone doesn't govern the decision. |
+| KDIGO 2024 | Reduced-eGFR lab-abnormality flagging. |
+| CDSCO / National Formulary of India (NFI) | Elevated-transaminase lab-abnormality flagging. |
 | FDA Guidance | Severe drug-drug interaction (DDI) identification, and pediatric/weight-based dosing context. |
 | ADATIP 9-Predictor Model (institutional) | Clinical Risk Assessment baseline ADR risk scoring. |
-| GerontoNet ADR Risk Score (Onder et al., Arch Intern Med 2010) | Clinical Risk Assessment baseline ADR risk scoring, and the Warfarin elderly-amplification rule in PGx Triage. |
-| CPIC & FDA Pharmacogenomics | The final genotype/phenotype-to-prescribing therapeutic recommendations once a PGx test has actually been ordered and resulted. |
+| GerontoNet ADR Risk Score (Onder et al., Arch Intern Med 2010) | The actual weighted Clinical Risk Assessment score, and the Warfarin elderly-amplification rule in PGx Triage. |
+| Per-rule provenance (see Section 6) | The final genotype/phenotype-to-prescribing therapeutic recommendations, once a PGx test has actually been ordered and resulted — no single blanket guideline label. |
 
 This is the same "guideline lock" philosophy the rule engine has followed throughout this project: deterministic, source-cited logic instead of a model that could quietly drift from the evidence it's supposed to represent.
 
 ---
 
-## 6. High-Value Drug Workflows (MVP Scope)
+## 8. High-Value Drug Workflows (MVP Scope)
 
 The triage layer's MVP scope is three drugs, chosen specifically because each demonstrates a different facet of the engine's nuance rather than repeating the same pattern three times:
 
 ### Clopidogrel (CYP2C19) — the HIGH PRIORITY plus DDI case
-Always triages HIGH PRIORITY: an FDA boxed warning and CPIC guidance both treat CYP2C19 poor/intermediate metabolizer status as directly actionable for antiplatelet selection. The DDI Engine layers on top of that: prescribing clopidogrel alongside a strong CYP2C19 inhibitor such as omeprazole independently reduces clopidogrel activation, compounding — not replacing — the genetic risk. A High Baseline ADR Risk verdict adds a rationale note rather than changing the triage color, since it's already at the ceiling. Downstream, `evaluate_prescription()` maps the resulting CYP2C19 genotype (normal / intermediate / poor) to a specific antiplatelet recommendation.
+Always triages HIGH PRIORITY: an FDA boxed warning and CPIC guidance both treat CYP2C19 poor/intermediate metabolizer status as directly actionable for antiplatelet selection. The DDI Engine layers on top of that: prescribing clopidogrel alongside a strong CYP2C19 inhibitor such as omeprazole independently reduces clopidogrel activation, compounding — not replacing — the genetic risk. A High Baseline ADR Risk verdict never changes the triage color (already at the ceiling); it is reported only via `general_adr_risk`. Downstream, `evaluate_prescription()` maps the resulting CYP2C19 genotype (normal / intermediate / poor) to a specific antiplatelet recommendation, with its own guideline URL, evidence date, and rule hash.
 
-### Tacrolimus (CYP3A5) — the nephrotoxicity plus hepatic case
-Also always triages HIGH PRIORITY (narrow therapeutic index, approximately 1.5-2x starting-dose difference between CYP3A5 expresser/non-expresser genotypes per CPIC) — but an eGFR below 60 or an ALT/AST above 40 independently produces a strong clinical warning, distinct from the triage state itself and naming the exact value and threshold crossed: PGx sets the starting-dose baseline, but an abnormal lab makes lab-driven therapeutic drug monitoring (TDM) mandatory regardless of genotype (KDIGO 2024 for renal, NFI for hepatic). A High Baseline ADR Risk verdict adds the same rationale note as Clopidogrel.
+### Tacrolimus (CYP3A5) — the lab-abnormality plus indication-aware TDM case
+Also always triages HIGH PRIORITY (narrow therapeutic index, approximately 1.5-2x starting-dose difference between CYP3A5 expresser/non-expresser genotypes per CPIC) — but a reduced eGFR or elevated transaminases independently produce a strong clinical warning, distinct from the triage state itself, naming the exact value and threshold crossed, and framed as a lab abnormality requiring clinical correlation rather than an automatic nephrotoxicity/hepatic-impairment diagnosis. PGx sets the starting-dose baseline; lab-driven TDM and dose caution are mandatory pending that correlation (KDIGO 2024 for renal, NFI for hepatic). The TDM alert's own target trough range is indication-aware (Section 5).
 
 ### Warfarin (CYP2C9 and VKORC1) — the CONSIDER case, with elderly plus ADR-risk amplification
-The only one of the three that does not default to HIGH PRIORITY. Routine PT/INR-guided dose titration is often sufficient for warfarin management without upfront genetic testing, so the baseline triage state is CONSIDER. It escalates to HIGH PRIORITY if any of the following hold: PT/INR is above 1.2, Platelets are below 150 x10³/µL, the DDI Engine detects a severe interaction (amiodarone or an NSAID), or — from the Clinical Risk Assessment — the patient is elderly (age 65 or older) and carries a High Baseline ADR Risk verdict, independent of labs or DDIs. A lab marked "Test Not Done / Unknown" never escalates on its own — only a value that actually crosses a threshold, a confirmed DDI, or the elderly plus high-ADR-risk combination does. Downstream, `evaluate_prescription()` combines a CYP2C9 diplotype and a VKORC1 genotype into a single sensitivity category (normal / increased / highly increased) — a simplified categorical form of CPIC's warfarin dosing framework, not the full multi-covariate pharmacogenetic equation.
+The only one of the three that does not default to HIGH PRIORITY. Routine PT/INR-guided dose titration is often sufficient for warfarin management without upfront genetic testing, so the baseline triage state is CONSIDER. It escalates to HIGH PRIORITY if any of the following hold: PT/INR is above 1.2, Platelets are below 150 x10³/µL (both reported as abnormal coagulation/CBC parameters, not a bleeding-risk diagnosis), the DDI Engine detects a severe interaction (amiodarone or an NSAID), or — from the Clinical Risk Assessment — the patient is elderly (age 65 or older) and carries a High Baseline ADR Risk verdict computed from the actual GerontoNet score, independent of labs or DDIs. A lab marked "Test Not Done / Unknown" never escalates on its own. Downstream, `evaluate_prescription()` combines a CYP2C9 diplotype and a VKORC1 genotype into a single sensitivity category (normal / increased / highly increased) — a simplified categorical form of CPIC's warfarin dosing framework, not the full multi-covariate pharmacogenetic equation.
 
-**Scope note:** the five other drugs this prototype models (Carbamazepine, Allopurinol, Abacavir, Primaquine, Rasburicase) retain their existing direct genotype/phenotype-to-dosing rules in `engine/rules.py`, but do not yet have a PGx Triage pre-test model — requesting triage for them correctly returns LOW PRIORITY with an explicit "not modeled in current MVP scope" rationale, rather than a guess.
+**Scope note:** the five other drugs this prototype models (Carbamazepine, Allopurinol, Abacavir, Primaquine, Rasburicase) retain their existing direct genotype/phenotype-to-dosing rules in `engine/rules.py` (each with its own per-rule provenance), but do not yet have a PGx Triage pre-test model — requesting triage for them correctly returns LOW PRIORITY with an explicit "not modeled in current MVP scope" rationale, rather than a guess.
 
 ### Similar Cases Preview
 
-Every screen keeps a permanent "Live Clinical Literature & Similar Cases (Prototype)" panel in the sidebar. This is a UI prototype only — it performs no web request, no literature search, and no scraping of any kind. It reactively reflects the currently entered age, requested drug, and ADR risk flag to preview what a live literature-matching feature would eventually surface, but the panel states plainly that its output is generated locally for demonstration and does not perform a live search, so a reviewer or clinician never mistakes the placeholder text for a real result.
+Every screen keeps a permanent "Live Clinical Literature & Similar Cases (Prototype)" panel in the sidebar. This is a UI prototype only — it performs no web request, no literature search, and no scraping of any kind. It reactively reflects the currently entered age, requested drug, and ADR risk flag to preview what a live literature-matching feature would eventually surface, but the panel states plainly that its output is generated locally for demonstration and does not perform a live search.
 
 ---
 
-## 7. Audit Trail
+## 9. Audit Trail
 
 `storage/audit_logger.py` persists every clinician decision to SQLite (`decisions.db`), including the Clinical Risk Assessment verdict alongside the existing clinical-encounter metadata and provenance fields:
 
 - `adr_risk_flag` — the exact High Baseline ADR Risk / Standard string computed by `calculate_adr_risk()` for that encounter.
+- `guideline_version` / `evidence_source` — populated from the matched rule's own `evidence_date` / `guideline_url` when a specific rule was evaluated, falling back to coarse whole-engine constants only when no per-rule provenance is available.
+- `rule_version` — populated from the matched rule's own `rule_hash` when available, falling back to the whole-engine `RULE_VERSION` otherwise.
 
 Schema changes are strictly additive: `_get_connection()` never drops or rebuilds the `decisions` table. A database created under an older, narrower schema is brought up to date via `ALTER TABLE ADD COLUMN` for whatever columns it's missing, which preserves every existing row — there is no automatic destruction of audit data.
 
 ---
 
-## 8. Execution Guide
+## 10. Execution Guide
 
 PRISM-AIIMS is fully containerized and runs identically on Windows, macOS, and Linux. The recommended path is Docker Compose; a native (non-Docker) path is also provided for local development.
 
@@ -254,7 +309,7 @@ In every case, the app is served at `http://localhost:8501`. Deactivate the virt
 
 ## Automated Testing
 
-`tests/` is a `unittest` suite of 92 tests covering every stage: `test_clinical.py` (renal/hepatic/bleeding-risk/age-weight assessment from exact numeric labs including every threshold boundary, plus `TestCalculateAdrRisk` covering the ADATIP and GerontoNet trigger logic), `test_ddi.py` (drug-drug interaction matching), `test_triage.py` (all three triage states across Clopidogrel, Tacrolimus, and Warfarin — including the lab-driven "mandatory TDM" warnings, the Warfarin elderly plus high-ADR-risk amplification rule, the Clopidogrel/Tacrolimus rationale-only surfacing, and the requirement that every parameter being `None` never raises a `TypeError`), and `test_rules.py` (the downstream genotype/phenotype dosing engine, including Warfarin's combined CYP2C9 plus VKORC1 categorization).
+`tests/` is a `unittest` suite of 135 tests covering every stage: `test_clinical.py` (renal/hepatic/coagulation lab-abnormality assessment from exact numeric labs including every threshold boundary, plus the exact GerontoNet score math and the composite `calculate_adr_risk` trigger logic), `test_ddi.py` (drug-drug interaction matching), `test_triage.py` (all three triage states across Clopidogrel, Tacrolimus, and Warfarin — the lab-abnormality-driven "mandatory TDM" warnings without diagnostic overclaiming, the Warfarin elderly plus high-ADR-risk amplification rule fed by the real GerontoNet math, the general-ADR-risk-vs-PGx-actionability separation, and the requirement that every parameter being `None` never raises a `TypeError`), and `test_rules.py` (the downstream genotype/phenotype dosing engine, including Warfarin's combined CYP2C9 plus VKORC1 categorization, per-rule provenance, Tacrolimus's indication-aware TDM targets, and G6PD's reference-range-aware interpretation).
 
 Run the full suite from the project root:
 
@@ -272,10 +327,10 @@ This exits 0 with `OK` when the suite passes, using only the Python standard lib
 PRISM-India/
 ├── app.py                     # Streamlit dashboard: Patient Baseline -> Clinical Risk Assessment -> PGx Triage -> Evaluation + Audit
 ├── engine/
-│   ├── clinical.py             # Objective labs (KDIGO renal, NFI hepatic, bleeding risk) + calculate_adr_risk()
-│   ├── ddi.py                  # Drug-drug interaction checker (FDA-anchored), used within PGx Triage
-│   ├── triage.py                # PGx Actionability Triage orchestrator, amplified by the Clinical Risk Assessment verdict
-│   └── rules.py                 # Downstream genotype/phenotype -> dosing engine: evaluate_prescription()
+│   ├── clinical.py             # Lab-abnormality assessment + calculate_gerontonet_score() + calculate_adr_risk()
+│   ├── ddi.py                  # Drug-drug interaction checker (curated MVP subset), used within PGx Triage
+│   ├── triage.py                # PGx Actionability Triage orchestrator; separates general ADR risk from PGx actionability
+│   └── rules.py                 # Downstream genotype/phenotype -> dosing engine + per-rule provenance: evaluate_prescription()
 ├── storage/
 │   └── audit_logger.py         # SQLite audit trail: log_decision(), get_all_logs() -- includes adr_risk_flag
 ├── abdm/

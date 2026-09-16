@@ -153,5 +153,113 @@ class TestWarfarinCombinedGenotype(unittest.TestCase):
         self.assertEqual(result["risk"], RISK_UNKNOWN)
 
 
+class TestRuleProvenance(unittest.TestCase):
+    """Every matched rule carries its own granular provenance -- no single
+    blanket 'CPIC' label describing the whole engine."""
+
+    def test_matched_rule_has_guideline_url_evidence_date_and_hash(self):
+        result = evaluate_prescription("Clopidogrel", "Genotype", "*1/*1")
+        self.assertTrue(result["guideline_url"].startswith("http"))
+        self.assertRegex(result["evidence_date"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertIsInstance(result["rule_hash"], str)
+        self.assertTrue(len(result["rule_hash"]) > 0)
+
+    def test_unknown_result_has_no_provenance(self):
+        result = evaluate_prescription("Clopidogrel", "Genotype", "*99/*99")
+        self.assertIsNone(result["guideline_url"])
+        self.assertIsNone(result["evidence_date"])
+        self.assertIsNone(result["rule_hash"])
+
+    def test_different_rules_have_different_hashes(self):
+        normal = evaluate_prescription("Clopidogrel", "Genotype", "*1/*1")
+        poor = evaluate_prescription("Clopidogrel", "Genotype", "*2/*2")
+        self.assertNotEqual(normal["rule_hash"], poor["rule_hash"])
+
+    def test_same_rule_is_deterministic(self):
+        first = evaluate_prescription("Warfarin", "Genotype", "CYP2C9=*1/*1;VKORC1=GG")
+        second = evaluate_prescription("Warfarin", "Genotype", "CYP2C9=*1/*1;VKORC1=GG")
+        self.assertEqual(first["rule_hash"], second["rule_hash"])
+
+    def test_no_bare_cpic_label_on_the_engine_constants(self):
+        from engine.rules import EVIDENCE_SOURCE, GUIDELINE_VERSION
+        self.assertNotEqual(GUIDELINE_VERSION.strip(), "CPIC")
+        self.assertNotEqual(EVIDENCE_SOURCE.strip(), "CPIC")
+
+
+class TestTacrolimusIndicationAwareTdm(unittest.TestCase):
+    """The TDM target range is indication-dependent, not a single universal cutoff."""
+
+    def test_kidney_transplant_target_matches_original_default(self):
+        result = evaluate_prescription(
+            "Tacrolimus", "Phenotype", "10 ng/mL", indication="Kidney Transplant",
+        )
+        self.assertEqual(result["risk"], RISK_NO_ALERT)
+
+    def test_kidney_transplant_18_is_supratherapeutic(self):
+        result = evaluate_prescription(
+            "Tacrolimus", "Phenotype", "18 ng/mL", indication="Kidney Transplant",
+        )
+        self.assertEqual(result["risk"], RISK_HIGH)
+        self.assertIn("Kidney Transplant", result["reason"])
+
+    def test_liver_transplant_18_is_within_the_wider_target_range(self):
+        result = evaluate_prescription(
+            "Tacrolimus", "Phenotype", "18 ng/mL", indication="Liver Transplant",
+        )
+        self.assertEqual(result["risk"], RISK_NO_ALERT)
+        self.assertIn("Liver Transplant", result["reason"])
+
+    def test_liver_transplant_22_is_supratherapeutic(self):
+        result = evaluate_prescription(
+            "Tacrolimus", "Phenotype", "22 ng/mL", indication="Liver Transplant",
+        )
+        self.assertEqual(result["risk"], RISK_HIGH)
+
+    def test_missing_indication_falls_back_to_kidney_transplant_default(self):
+        with_none = evaluate_prescription("Tacrolimus", "Phenotype", "18 ng/mL")
+        with_kidney = evaluate_prescription(
+            "Tacrolimus", "Phenotype", "18 ng/mL", indication="Kidney Transplant",
+        )
+        self.assertEqual(with_none["risk"], with_kidney["risk"])
+        self.assertEqual(with_none["risk"], RISK_HIGH)
+
+    def test_unrecognized_indication_falls_back_to_default_without_crashing(self):
+        result = evaluate_prescription(
+            "Tacrolimus", "Phenotype", "10 ng/mL", indication="Some Other Organ",
+        )
+        self.assertEqual(result["risk"], RISK_NO_ALERT)
+
+
+class TestG6pdReferenceRangeAware(unittest.TestCase):
+    """G6PD phenotype interpretation uses the ordering lab's own reference
+    range when supplied, rather than a single fixed cutoff for every lab."""
+
+    def test_default_threshold_matches_original_behavior(self):
+        result = evaluate_prescription("Primaquine", "Phenotype", "8%")
+        self.assertEqual(result["risk"], RISK_HIGH)
+        result2 = evaluate_prescription("Primaquine", "Phenotype", "15%")
+        self.assertEqual(result2["risk"], RISK_NO_ALERT)
+
+    def test_custom_reference_range_raises_the_deficiency_cutoff(self):
+        # 12% is above the MVP default of 10% but below a lab whose own
+        # lower limit of normal is 15%.
+        result = evaluate_prescription(
+            "Primaquine", "Phenotype", "12%", reference_range_low=15.0,
+        )
+        self.assertEqual(result["risk"], RISK_HIGH)
+
+    def test_custom_reference_range_can_lower_the_deficiency_cutoff(self):
+        result = evaluate_prescription(
+            "Rasburicase", "Phenotype", "8%", reference_range_low=5.0,
+        )
+        self.assertEqual(result["risk"], RISK_NO_ALERT)
+
+    def test_reference_range_ignored_for_genotype(self):
+        result = evaluate_prescription(
+            "Primaquine", "Genotype", "Normal", reference_range_low=50.0,
+        )
+        self.assertEqual(result["risk"], RISK_NO_ALERT)
+
+
 if __name__ == "__main__":
     unittest.main()

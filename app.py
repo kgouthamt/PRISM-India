@@ -17,7 +17,7 @@ from engine.rules import (
 from engine.triage import TRIAGE_CONSIDER, TRIAGE_HIGH, triage_pgx_actionability
 from storage.audit_logger import get_all_logs, log_decision
 
-SOFTWARE_VERSION = "PRISM-AIIMS v6.0.0"
+SOFTWARE_VERSION = "PRISM-AIIMS v7.0.0"
 
 st.set_page_config(page_title="PRISM-AIIMS", layout="wide")
 
@@ -209,6 +209,37 @@ def _lab_value_with_unknown_checkbox(label, min_value, max_value, default_value,
     return None if unknown else value
 
 
+TACROLIMUS_INDICATION_OPTIONS = ["Kidney Transplant", "Liver Transplant", "Other / Unspecified"]
+
+
+def _render_clinical_context_inputs(drug: str, test_type: str) -> dict:
+    """Render drug-specific clinical-context inputs that refine, but never
+    replace, the genotype/phenotype rule: Tacrolimus's transplant indication
+    (which sets the TDM target trough range) and G6PD's local laboratory
+    reference range (since the enzyme-activity assay is not standardized
+    across labs). Returns kwargs to merge into evaluate_prescription(...).
+    """
+    drug_key = drug.lower()
+    context = {}
+    if drug_key == "tacrolimus":
+        indication = st.selectbox(
+            "Indication / Clinical Context", TACROLIMUS_INDICATION_OPTIONS,
+            help="Sets the therapeutic trough target range used by the TDM "
+                 "alert below; transplant protocols differ in target trough "
+                 "by indication.",
+        )
+        context["indication"] = None if indication == "Other / Unspecified" else indication
+    elif drug_key in ("primaquine", "rasburicase") and test_type == "Phenotype":
+        context["reference_range_low"] = st.number_input(
+            "Local Laboratory Reference Range -- Lower Limit of Normal (%)",
+            min_value=0.0, max_value=100.0, value=10.0, step=0.5,
+            help="G6PD enzyme-activity assays are not standardized across "
+                 "labs; enter this lab's own lower limit of normal rather "
+                 "than relying on a fixed cutoff.",
+        )
+    return context
+
+
 def _alert_card(level: str, title: str, body_html: str) -> None:
     """Render a large, colored alert card (level: 'high'/'consider'/'low'/'info')."""
     st.markdown(
@@ -289,9 +320,12 @@ def _log_and_export(clinician_decision: str, override_reason: str = None) -> Non
         assay_lab=assay_lab.strip(),
         specimen_date=str(specimen_date),
         result_verification_status=result_verification_status,
-        guideline_version=GUIDELINE_VERSION,
-        rule_version=RULE_VERSION,
-        evidence_source=EVIDENCE_SOURCE,
+        # Per-rule provenance (guideline_url / evidence_date), when the
+        # matched rule has any, takes precedence over the coarse whole-engine
+        # fallback constants -- there is no single blanket guideline label.
+        guideline_version=ctx.get("evidence_date") or GUIDELINE_VERSION,
+        rule_version=ctx.get("rule_hash") or RULE_VERSION,
+        evidence_source=ctx.get("guideline_url") or EVIDENCE_SOURCE,
         software_version=SOFTWARE_VERSION,
     )
 
@@ -395,13 +429,17 @@ with tab1:
         with gerontonet_col:
             with st.container(border=True):
                 st.markdown("**GerontoNet Risk Score**")
-                st.caption("History of ADR is captured under General Clinical History below.")
+                st.caption(
+                    "History of ADR is captured under General Clinical History "
+                    "below. Scored using the actual validated GerontoNet point "
+                    "weights, not a simple predictor count."
+                )
                 num_concurrent_drugs = st.number_input(
                     "Number of concurrent drugs", min_value=0, max_value=30, value=0, step=1
                 )
                 heart_failure = st.checkbox("Heart failure")
                 liver_disease = st.checkbox("Liver disease")
-                gt4_medical_conditions = st.checkbox("> 4 medical conditions")
+                gte4_comorbid_conditions = st.checkbox("≥ 4 comorbid conditions")
                 renal_failure = st.checkbox("Renal failure")
 
         st.markdown("**General Clinical History**")
@@ -426,13 +464,21 @@ with tab1:
             num_concurrent_drugs=num_concurrent_drugs,
             heart_failure=heart_failure,
             liver_disease=liver_disease,
-            gt4_medical_conditions=gt4_medical_conditions,
+            gte4_comorbid_conditions=gte4_comorbid_conditions,
             renal_failure=renal_failure,
             previous_adr_history=previous_adr_history,
             allergy_history=allergy_history,
             family_history=family_history,
         )
         st.session_state["adr_risk_flag"] = adr_result["adr_risk_flag"]
+
+        gerontonet_score = adr_result["gerontonet_score"]
+        score_col, category_col = st.columns(2)
+        score_col.metric(
+            "GerontoNet ADR Risk Score",
+            f"{gerontonet_score['total_score']} / {gerontonet_score['max_score']}",
+        )
+        category_col.metric("GerontoNet Risk Category", gerontonet_score["risk_category"])
 
         if adr_result["high_baseline_adr_risk"]:
             reasons_html = html.escape("; ".join(adr_result["reasons"]))
@@ -461,6 +507,10 @@ with tab1:
             )
         concurrent_medications = [d.strip() for d in concomitant_drugs_text.split(",") if d.strip()]
         st.session_state["requested_drug"] = drug
+        st.caption(
+            "Note: This DDI database is a curated MVP subset, not a "
+            "comprehensive interaction checker."
+        )
 
         diagnostic_data_choice = st.radio("Diagnostic Data Available:", DIAGNOSTIC_DATA_OPTIONS, horizontal=True)
 
@@ -471,13 +521,14 @@ with tab1:
         with st.container(border=True):
             st.subheader("Genotype / Phenotype Evaluation")
             test_result = _render_test_result_input(drug, test_type)
+            clinical_context = _render_clinical_context_inputs(drug, test_type)
             evaluate_clicked = st.button("Evaluate", type="primary")
 
             if evaluate_clicked:
                 if not patient_id.strip():
                     st.warning("Patient ID is required before evaluating.")
                 else:
-                    result = evaluate_prescription(drug, test_type, test_result)
+                    result = evaluate_prescription(drug, test_type, test_result, **clinical_context)
                     st.session_state["result"] = result
                     st.session_state["eval_context"] = {
                         "patient_id": patient_id.strip(),
@@ -485,6 +536,9 @@ with tab1:
                         "test_type": test_type,
                         "test_result": test_result,
                         "recommendation_given": result["recommendation_and_dosage"] or result["reason"],
+                        "guideline_url": result.get("guideline_url"),
+                        "evidence_date": result.get("evidence_date"),
+                        "rule_hash": result.get("rule_hash"),
                     }
                     st.session_state["show_override"] = False
                     st.session_state["fhir_bundle"] = None
@@ -531,6 +585,13 @@ with tab1:
 
                 else:
                     _alert_card("info", "INFORMATION", html.escape(result["reason"]))
+
+                if result.get("guideline_url"):
+                    st.caption(
+                        f"Rule provenance -- Guideline: {result['guideline_url']} | "
+                        f"Evidence date: {result.get('evidence_date')} | "
+                        f"Rule hash: {result.get('rule_hash')}"
+                    )
 
                 fhir_bundle = st.session_state.get("fhir_bundle")
                 if fhir_bundle:
@@ -607,7 +668,7 @@ with tab1:
                         f"PGx testing for <b>{triage_drug_safe}</b> is unlikely to change management.",
                     )
 
-                st.markdown("**Rationale:**")
+                st.markdown("**Rationale (PGx Actionability):**")
                 for line in triage_result["rationale"]:
                     st.markdown(f"- {line}")
 
@@ -615,6 +676,11 @@ with tab1:
                     st.markdown("**Lab-Driven Safety Warnings:**")
                     for warning_text in triage_result["warnings"]:
                         st.error(warning_text)
+
+                general_adr_risk = triage_result.get("general_adr_risk")
+                if general_adr_risk:
+                    st.markdown("**General ADR Risk (Patient Fragility -- kept separate from PGx Actionability):**")
+                    st.info(general_adr_risk["note"])
 
                 if triage_result["ddi_findings"]:
                     st.markdown("**Drug-Drug Interaction (DDI Engine) Findings:**")
