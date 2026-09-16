@@ -3,14 +3,18 @@
 import unittest
 
 from engine.clinical import (
+    ADR_RISK_HIGH,
+    ADR_RISK_STANDARD,
     ALT_AST_THRESHOLD,
     EGFR_THRESHOLD,
     PLATELETS_THRESHOLD,
+    POLYPHARMACY_DRUG_THRESHOLD,
     PT_INR_THRESHOLD,
     assess_age_weight_context,
     assess_bleeding_risk_labs,
     assess_hepatic_function,
     assess_renal_function,
+    calculate_adr_risk,
 )
 
 
@@ -113,6 +117,61 @@ class TestAgeWeightContext(unittest.TestCase):
 
     def test_source_is_fda_dosing_guidance(self):
         self.assertIn("FDA", assess_age_weight_context(age=40, weight=70)["source"])
+
+
+class TestCalculateAdrRisk(unittest.TestCase):
+    """Layer 2: baseline ADR risk from Model A (9-predictor) and Model B
+    (GerontoNet, 6-predictor)."""
+
+    def test_no_predictors_is_standard_risk(self):
+        result = calculate_adr_risk()
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_STANDARD)
+        self.assertFalse(result["high_baseline_adr_risk"])
+        self.assertEqual(result["reasons"], [])
+
+    def test_history_of_adr_alone_is_high_risk(self):
+        result = calculate_adr_risk(history_of_adr=True)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
+
+    def test_polypharmacy_above_threshold_is_high_risk(self):
+        result = calculate_adr_risk(num_concurrent_drugs=POLYPHARMACY_DRUG_THRESHOLD + 1)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
+
+    def test_drugs_at_threshold_is_not_high_risk(self):
+        result = calculate_adr_risk(num_concurrent_drugs=POLYPHARMACY_DRUG_THRESHOLD)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_STANDARD)
+
+    def test_single_model_a_predictor_is_not_high_risk(self):
+        result = calculate_adr_risk(chronic_lung_disease=True)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_STANDARD)
+
+    def test_two_model_a_predictors_is_high_risk(self):
+        result = calculate_adr_risk(chronic_lung_disease=True, on_diuretics=True)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
+        self.assertEqual(result["model_a_trigger_count"], 2)
+
+    def test_single_gerontonet_secondary_predictor_is_not_high_risk(self):
+        result = calculate_adr_risk(heart_failure=True)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_STANDARD)
+
+    def test_two_gerontonet_secondary_predictors_is_high_risk(self):
+        result = calculate_adr_risk(heart_failure=True, liver_disease=True)
+        self.assertEqual(result["adr_risk_flag"], ADR_RISK_HIGH)
+
+    def test_reasons_list_is_populated_when_high_risk(self):
+        result = calculate_adr_risk(history_of_adr=True)
+        self.assertTrue(len(result["reasons"]) >= 1)
+
+    def test_source_cites_both_models(self):
+        source = calculate_adr_risk()["source"]
+        self.assertIn("Model A", source)
+        self.assertIn("GerontoNet", source)
+
+    def test_no_missing_keyword_raises_type_error(self):
+        # Every parameter is optional -- calling with none of them must not
+        # raise a TypeError or KeyError.
+        result = calculate_adr_risk()
+        self.assertIn("high_baseline_adr_risk", result)
 
 
 if __name__ == "__main__":

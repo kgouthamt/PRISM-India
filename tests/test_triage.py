@@ -102,6 +102,60 @@ class TestNoneValuesNeverCrash(unittest.TestCase):
             )
             self.assertIn("triage", result)
 
+    def test_all_none_with_adr_risk_flag_across_every_drug(self):
+        for drug in ("Clopidogrel", "Tacrolimus", "Warfarin", "Ibuprofen"):
+            for adr_flag in (True, False):
+                result = triage_pgx_actionability(
+                    drug, None, age=None, weight=None, egfr=None,
+                    alt_ast=None, platelets=None, pt_inr=None,
+                    high_baseline_adr_risk=adr_flag,
+                )
+                self.assertIn("triage", result)
+
+
+class TestLayer2AdrRiskAmplification(unittest.TestCase):
+    """Layer 3 amplification: a Layer 2 'High Baseline ADR Risk' flag."""
+
+    def test_warfarin_elderly_and_high_adr_risk_escalates_immediately(self):
+        # Normal labs, no DDI -- escalation must come purely from age + ADR risk.
+        result = triage_pgx_actionability(
+            "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
+            high_baseline_adr_risk=True,
+        )
+        self.assertEqual(result["triage"], TRIAGE_HIGH)
+        self.assertTrue(any("Elderly" in w for w in result["warnings"]))
+
+    def test_warfarin_high_adr_risk_but_not_elderly_does_not_escalate(self):
+        result = triage_pgx_actionability(
+            "Warfarin", [], age=40, platelets=250, pt_inr=1.0,
+            high_baseline_adr_risk=True,
+        )
+        self.assertEqual(result["triage"], TRIAGE_CONSIDER)
+
+    def test_warfarin_elderly_but_standard_adr_risk_does_not_escalate(self):
+        result = triage_pgx_actionability(
+            "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
+            high_baseline_adr_risk=False,
+        )
+        self.assertEqual(result["triage"], TRIAGE_CONSIDER)
+
+    def test_warfarin_elderly_with_missing_age_never_crashes_or_escalates(self):
+        result = triage_pgx_actionability(
+            "Warfarin", [], age=None, platelets=250, pt_inr=1.0,
+            high_baseline_adr_risk=True,
+        )
+        self.assertEqual(result["triage"], TRIAGE_CONSIDER)
+
+    def test_clopidogrel_high_adr_risk_surfaces_in_rationale_without_changing_triage(self):
+        result = triage_pgx_actionability("Clopidogrel", high_baseline_adr_risk=True)
+        self.assertEqual(result["triage"], TRIAGE_HIGH)
+        self.assertTrue(any("Layer 2" in line for line in result["rationale"]))
+
+    def test_tacrolimus_high_adr_risk_surfaces_in_rationale_without_changing_triage(self):
+        result = triage_pgx_actionability("Tacrolimus", high_baseline_adr_risk=True)
+        self.assertEqual(result["triage"], TRIAGE_HIGH)
+        self.assertTrue(any("Layer 2" in line for line in result["rationale"]))
+
 
 class TestOutOfScopeDrug(unittest.TestCase):
     def test_unmodeled_drug_is_low_priority(self):

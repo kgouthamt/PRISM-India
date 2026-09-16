@@ -8,13 +8,24 @@ downstream genotype/phenotype -> dosing decision *after* a PGx test result is
 already available -- triage answers "should we test at all," rules.py
 answers "given the test result, what do we do."
 
-The 🔴/🟡/🟢 score is driven strictly by the drug, exact numeric routine lab
-values (eGFR, ALT/AST, Platelets, PT/INR), age/weight, and the DDI Engine's
-findings -- never by subjective patient-reported history (a prior adverse
-drug reaction, a prior treatment failure). That data is real and clinically
-relevant, but it is not the kind of routine, verifiable input this triage
-layer is scoped to reason about. Any lab a clinician marks "Test Not Done /
-Unknown" is passed through as `None` and never raises a risk flag.
+The 🔴/🟡/🟢 score is driven by the drug, exact numeric routine lab values
+(eGFR, ALT/AST, Platelets, PT/INR), age/weight, the DDI Engine's findings,
+and -- as of Layer 2 -- the calculated baseline ADR risk flag from
+engine.clinical.calculate_adr_risk(). It is never driven by raw subjective
+predictor checkboxes themselves (this module never sees "history of ADR" or
+"heart failure" directly): only the single boolean verdict Layer 2 already
+computed crosses into Layer 3, exactly like a lab result crosses in as
+"HIGH"/"LOW"/"UNKNOWN" rather than a raw lab value plus its interpretation
+logic. Any lab a clinician marks "Test Not Done / Unknown" is passed through
+as `None` and never raises a risk flag.
+
+For Warfarin specifically, a "High Baseline ADR Risk" flag from Layer 2
+acts as an amplifying factor: combined with an elderly patient (age >= 65,
+matching GerontoNet's own target population), it escalates the triage to
+HIGH PRIORITY immediately, on top of the existing lab/DDI-driven escalation
+conditions. For Clopidogrel and Tacrolimus, which are already always HIGH
+PRIORITY, the same flag is instead surfaced as an additional rationale line,
+since there is no higher triage state to escalate to.
 
 Output triage states:
     HIGH PRIORITY   -- testing strongly indicated
@@ -25,6 +36,7 @@ Output triage states:
 from engine.clinical import (
     ALT_AST_THRESHOLD,
     EGFR_THRESHOLD,
+    ELDERLY_AGE_THRESHOLD,
     assess_age_weight_context,
     assess_bleeding_risk_labs,
     assess_hepatic_function,
@@ -37,7 +49,7 @@ TRIAGE_CONSIDER = "CONSIDER"
 TRIAGE_LOW = "LOW PRIORITY"
 
 
-def _clopidogrel_triage(concurrent_medications):
+def _clopidogrel_triage(concurrent_medications, high_baseline_adr_risk=False):
     ddi_findings = check_drug_interactions("clopidogrel", concurrent_medications)
     rationale = [
         "CYP2C19 poor/intermediate metabolizer status changes first-line "
@@ -45,6 +57,12 @@ def _clopidogrel_triage(concurrent_medications):
         "effectiveness; PGx is highly actionable for efficacy regardless of "
         "routine labs.",
     ]
+    if high_baseline_adr_risk:
+        rationale.append(
+            "Layer 2 flags High Baseline ADR Risk; already at the highest "
+            "triage priority, but this warrants extra vigilance when "
+            "monitoring for adverse effects."
+        )
     warnings = []
     if ddi_findings:
         warnings.append(
@@ -61,7 +79,7 @@ def _clopidogrel_triage(concurrent_medications):
     }
 
 
-def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None):
+def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None, high_baseline_adr_risk=False):
     ddi_findings = check_drug_interactions("tacrolimus", concurrent_medications)
     renal = assess_renal_function(egfr)
     hepatic = assess_hepatic_function(alt_ast)
@@ -71,6 +89,12 @@ def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None):
         "~1.5-2x per CPIC; PGx sets the starting-dose baseline regardless of "
         "routine labs.",
     ]
+    if high_baseline_adr_risk:
+        rationale.append(
+            "Layer 2 flags High Baseline ADR Risk; already at the highest "
+            "triage priority, but this warrants extra vigilance when "
+            "monitoring for adverse effects."
+        )
     warnings = []
     if renal["nephrotoxicity_risk"] == "HIGH":
         warnings.append(
@@ -99,19 +123,21 @@ def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None):
     }
 
 
-def _warfarin_triage(concurrent_medications, platelets=None, pt_inr=None):
+def _warfarin_triage(concurrent_medications, platelets=None, pt_inr=None, high_baseline_adr_risk=False, age=None):
     ddi_findings = check_drug_interactions("warfarin", concurrent_medications)
     bleeding_risk = assess_bleeding_risk_labs(platelets, pt_inr)
 
     severe_ddi = any(finding["severity"] == "MAJOR" for finding in ddi_findings)
-    high_baseline_risk = bleeding_risk["baseline_bleeding_risk"] == "HIGH"
+    high_baseline_bleeding_risk = bleeding_risk["baseline_bleeding_risk"] == "HIGH"
+    is_elderly = age is not None and age >= ELDERLY_AGE_THRESHOLD
+    elderly_high_adr_risk = high_baseline_adr_risk and is_elderly
 
     rationale = [
         "Routine PT/INR monitoring and dose titration is often sufficient for "
         "warfarin management without upfront genetic testing.",
     ]
     warnings = []
-    if high_baseline_risk:
+    if high_baseline_bleeding_risk:
         warnings.append(
             "High baseline bleeding risk (" + "; ".join(bleeding_risk["flags"]) +
             ") makes genotype-guided starting-dose selection more valuable."
@@ -122,8 +148,26 @@ def _warfarin_triage(concurrent_medications, platelets=None, pt_inr=None):
             "NSAID); this independently elevates bleeding risk and warrants "
             "closer management regardless of genotype."
         )
+    if elderly_high_adr_risk:
+        warnings.append(
+            f"Elderly patient (age {age} ≥ {ELDERLY_AGE_THRESHOLD}) with Layer 2 "
+            "High Baseline ADR Risk (GerontoNet): this population is at "
+            "materially higher risk of an adverse drug reaction, and "
+            "genotype-guided starting-dose selection is correspondingly "
+            "more valuable than routine titration alone."
+        )
+    elif high_baseline_adr_risk:
+        rationale.append(
+            "Layer 2 flags High Baseline ADR Risk, but the patient is not "
+            "elderly (age < 65); this alone does not escalate warfarin "
+            "triage per the GerontoNet-anchored amplification rule."
+        )
 
-    triage = TRIAGE_HIGH if (high_baseline_risk or severe_ddi) else TRIAGE_CONSIDER
+    triage = (
+        TRIAGE_HIGH
+        if (high_baseline_bleeding_risk or severe_ddi or elderly_high_adr_risk)
+        else TRIAGE_CONSIDER
+    )
 
     return {
         "triage": triage,
@@ -144,6 +188,7 @@ def triage_pgx_actionability(
     alt_ast: float = None,
     platelets: float = None,
     pt_inr: float = None,
+    high_baseline_adr_risk: bool = False,
 ) -> dict:
     """Pre-test triage: should a PGx test even be ordered for this drug?
 
@@ -151,26 +196,34 @@ def triage_pgx_actionability(
     inputs: `egfr` (mL/min/1.73m^2), `alt_ast` (U/L), `platelets` (x10^3/uL),
     `pt_inr` (ratio), `age` (years), `weight` (kg). Any of these may be
     `None` when a clinician marks a test "Not Done / Unknown" -- that never
-    raises a risk flag. There is no parameter for patient-reported history
-    (e.g. a prior ADR or treatment failure) -- this triage layer does not
-    use subjective inputs.
+    raises a risk flag. `high_baseline_adr_risk` is the single boolean
+    verdict already computed by Layer 2's engine.clinical.calculate_adr_risk()
+    -- this function never receives or reasons about the raw subjective
+    predictor checkboxes (history of ADR, heart failure, etc.) behind it.
 
     Returns {"triage", "rationale", "warnings", "ddi_findings", "clinical_findings"}.
     `warnings` (distinct from `rationale`) carries strong, lab-driven safety
     flags -- e.g. Tacrolimus's mandatory-TDM warning on an abnormal eGFR/
-    ALT-AST. A drug outside this triage layer's MVP scope (Clopidogrel,
-    Tacrolimus, Warfarin) returns LOW PRIORITY with an explanatory
-    rationale, rather than a fabricated assessment.
+    ALT-AST, or Warfarin's elderly+high-ADR-risk escalation warning. A drug
+    outside this triage layer's MVP scope (Clopidogrel, Tacrolimus,
+    Warfarin) returns LOW PRIORITY with an explanatory rationale, rather
+    than a fabricated assessment.
     """
     drug_key = (drug or "").strip().lower()
     age_weight = assess_age_weight_context(age, weight)
 
     if drug_key == "clopidogrel":
-        result = _clopidogrel_triage(concurrent_medications)
+        result = _clopidogrel_triage(concurrent_medications, high_baseline_adr_risk=high_baseline_adr_risk)
     elif drug_key == "tacrolimus":
-        result = _tacrolimus_triage(concurrent_medications, egfr=egfr, alt_ast=alt_ast)
+        result = _tacrolimus_triage(
+            concurrent_medications, egfr=egfr, alt_ast=alt_ast,
+            high_baseline_adr_risk=high_baseline_adr_risk,
+        )
     elif drug_key == "warfarin":
-        result = _warfarin_triage(concurrent_medications, platelets=platelets, pt_inr=pt_inr)
+        result = _warfarin_triage(
+            concurrent_medications, platelets=platelets, pt_inr=pt_inr,
+            high_baseline_adr_risk=high_baseline_adr_risk, age=age,
+        )
     else:
         result = {
             "triage": TRIAGE_LOW,

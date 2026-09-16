@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     guideline_version TEXT,
     rule_version TEXT,
     evidence_source TEXT,
-    software_version TEXT
+    software_version TEXT,
+    adr_risk_flag TEXT
 )
 """
 
@@ -48,7 +49,7 @@ _MIGRATABLE_COLUMNS = [
     "recommendation_given", "clinician_decision", "override_reason",
     "clinician_id", "institution", "encounter_id", "assay_lab", "specimen_date",
     "result_verification_status", "guideline_version", "rule_version",
-    "evidence_source", "software_version",
+    "evidence_source", "software_version", "adr_risk_flag",
 ]
 
 
@@ -84,13 +85,16 @@ def log_decision(
     rule_version: str = None,
     evidence_source: str = None,
     software_version: str = None,
+    adr_risk_flag: str = None,
 ) -> None:
     """Persist one clinician decision. clinician_decision is ACCEPTED or OVERRIDDEN.
 
     The keyword-only arguments are structured clinical-encounter metadata
-    (clinician_id..result_verification_status) and system provenance fields
-    (guideline_version..software_version); both groups are optional so callers
-    that only need the original core fields keep working unchanged.
+    (clinician_id..result_verification_status), system provenance fields
+    (guideline_version..software_version), and the Layer 2 baseline ADR risk
+    verdict (adr_risk_flag, e.g. engine.clinical.ADR_RISK_HIGH or
+    ADR_RISK_STANDARD); all are optional so callers that only need the
+    original core fields keep working unchanged.
     """
     conn = _get_connection()
     with conn:
@@ -101,8 +105,8 @@ def log_decision(
                  recommendation_given, clinician_decision, override_reason,
                  clinician_id, institution, encounter_id, assay_lab, specimen_date,
                  result_verification_status, guideline_version, rule_version,
-                 evidence_source, software_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 evidence_source, software_version, adr_risk_flag)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now().isoformat(timespec="seconds"),
@@ -124,6 +128,7 @@ def log_decision(
                 rule_version,
                 evidence_source,
                 software_version,
+                adr_risk_flag,
             ),
         )
     conn.close()

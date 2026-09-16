@@ -3,6 +3,7 @@ import json
 import streamlit as st
 
 from abdm.fhir_builder import generate_fhir_bundle
+from engine.clinical import calculate_adr_risk
 from engine.ddi import ALL_INTERACTING_DRUGS
 from engine.rules import (
     EVIDENCE_SOURCE,
@@ -15,11 +16,11 @@ from engine.rules import (
 from engine.triage import TRIAGE_CONSIDER, TRIAGE_HIGH, triage_pgx_actionability
 from storage.audit_logger import get_all_logs, log_decision
 
-SOFTWARE_VERSION = "PRISM-India v4.0.0"
+SOFTWARE_VERSION = "PRISM-AIIMS v5.0.0"
 
-st.set_page_config(page_title="PRISM-India", page_icon="🧬", layout="centered")
+st.set_page_config(page_title="PRISM-AIIMS", page_icon="🧬", layout="centered")
 
-st.title("PRISM-India: Cost-Conscious Clinical + PGx Decision Support")
+st.title("PRISM-AIIMS: 3-Layer Clinical + PGx Decision Support")
 st.caption("Team ID: DENDRITE-PE-XD-018")
 
 DRUG_OPTIONS = [
@@ -155,7 +156,7 @@ def _similar_cases_expander(age, drug, extra_context: str = "") -> None:
             "web or literature search. No external request is made."
         )
         st.markdown(
-            f"In a future version, PRISM-India would search medical "
+            f"In a future version, PRISM-AIIMS would search medical "
             f"literature and de-identified case repositories for patient "
             f"profiles similar to this one -- **age {age}, drug: {drug}**"
             + (f", {extra_context}" if extra_context else "")
@@ -208,6 +209,7 @@ def _log_and_export(clinician_decision: str, override_reason: str = None) -> Non
     log_decision(
         ctx["patient_id"], ctx["drug"], ctx["test_type"], ctx["test_result"],
         ctx["recommendation_given"], clinician_decision, override_reason,
+        adr_risk_flag=st.session_state.get("adr_risk_flag"),
         **common_kwargs,
     )
     st.session_state["fhir_bundle"] = generate_fhir_bundle(
@@ -219,15 +221,94 @@ def _log_and_export(clinician_decision: str, override_reason: str = None) -> Non
 
 
 with main_tab:
-    st.subheader("Patient Baseline")
-    col1, col2 = st.columns(2)
-    with col1:
-        patient_id = st.text_input("Patient ID", placeholder="e.g. PT-1001")
-        weight = st.number_input("Weight (kg)", min_value=0.0, max_value=250.0, value=70.0, step=0.5)
-    with col2:
-        age = st.number_input("Age (years)", min_value=0, max_value=120, value=40, step=1)
-        drug = st.selectbox("Drug Requested", DRUG_OPTIONS)
+    patient_id = st.text_input("Patient ID (Medical Record Number)", placeholder="e.g. PT-1001")
 
+    with st.expander("LAYER 1: Patient Details & Vitals", expanded=True):
+        st.markdown("**Demographics**")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            patient_name = st.text_input("Name", placeholder="e.g. Ramesh Kumar")
+        with col2:
+            age = st.number_input("Age (years)", min_value=0, max_value=120, value=40, step=1)
+        with col3:
+            address = st.text_input("Address", placeholder="e.g. New Delhi, India")
+
+        st.markdown("**Anthropometrics**")
+        col4, col5 = st.columns(2)
+        with col4:
+            height = st.number_input("Height (cm)", min_value=0.0, max_value=250.0, value=165.0, step=0.5)
+        with col5:
+            weight = st.number_input("Weight (kg)", min_value=0.0, max_value=250.0, value=70.0, step=0.5)
+
+        st.markdown("**Vitals**")
+        col6, col7, col8 = st.columns(3)
+        with col6:
+            pulse_rate = st.number_input("PR (bpm)", min_value=0, max_value=250, value=80, step=1)
+        with col7:
+            bp_systolic = st.number_input("BP Systolic (mmHg)", min_value=0, max_value=300, value=120, step=1)
+        with col8:
+            bp_diastolic = st.number_input("BP Diastolic (mmHg)", min_value=0, max_value=200, value=80, step=1)
+        col9, col10, col11 = st.columns(3)
+        with col9:
+            respiratory_rate = st.number_input("RR (breaths/min)", min_value=0, max_value=80, value=16, step=1)
+        with col10:
+            spo2 = st.number_input("SpO2 (%)", min_value=0, max_value=100, value=98, step=1)
+        with col11:
+            temperature = st.number_input("Temperature (°F)", min_value=80.0, max_value=115.0, value=98.6, step=0.1)
+
+    with st.expander("LAYER 2: ADR Risk Prediction", expanded=True):
+        st.caption(
+            "Baseline Adverse Drug Reaction (ADR) risk, from two predictor "
+            "models -- entirely independent of the drug being requested."
+        )
+        st.markdown("**Model A (9-Predictor ADR Risk Model)**")
+        col_a1, col_a2 = st.columns(2)
+        with col_a1:
+            chronic_lung_disease = st.checkbox("Chronic lung disease")
+            bleeding_or_gi_disorder = st.checkbox("Presenting with bleeding / GI disorder")
+            syncope_on_admission = st.checkbox("Syncope on admission")
+        with col_a2:
+            on_antithrombotics = st.checkbox("On antithrombotics")
+            on_diuretics = st.checkbox("On diuretics")
+            on_raas_drugs = st.checkbox("On RAAS drugs (ACEi / ARB)")
+
+        st.markdown("**Model B — GerontoNet ADR Risk Score (6-Predictor)**")
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            num_concurrent_drugs = st.number_input(
+                "Number of concurrent drugs", min_value=0, max_value=30, value=0, step=1
+            )
+            history_of_adr = st.checkbox("History of ADR ⭐ (strongest predictor)")
+            heart_failure = st.checkbox("Heart failure")
+        with col_b2:
+            liver_disease = st.checkbox("Liver disease")
+            gt4_medical_conditions = st.checkbox("> 4 medical conditions")
+            renal_failure = st.checkbox("Renal failure")
+
+        adr_result = calculate_adr_risk(
+            chronic_lung_disease=chronic_lung_disease,
+            bleeding_or_gi_disorder=bleeding_or_gi_disorder,
+            syncope_on_admission=syncope_on_admission,
+            on_antithrombotics=on_antithrombotics,
+            on_diuretics=on_diuretics,
+            on_raas_drugs=on_raas_drugs,
+            num_concurrent_drugs=num_concurrent_drugs,
+            history_of_adr=history_of_adr,
+            heart_failure=heart_failure,
+            liver_disease=liver_disease,
+            gt4_medical_conditions=gt4_medical_conditions,
+            renal_failure=renal_failure,
+        )
+        st.session_state["adr_risk_flag"] = adr_result["adr_risk_flag"]
+
+        if adr_result["high_baseline_adr_risk"]:
+            st.error("⚠️ " + adr_result["adr_risk_flag"] + " — " + "; ".join(adr_result["reasons"]))
+        else:
+            st.success("✅ Standard baseline ADR risk")
+
+    st.markdown("---")
+    st.header("LAYER 3: PGx Triage")
+    drug = st.selectbox("Drug Requested", DRUG_OPTIONS)
     concomitant_drugs_text = st.text_input(
         "Current Medications",
         placeholder="e.g. Omeprazole, Amiodarone",
@@ -321,9 +402,10 @@ with main_tab:
         st.subheader("Pre-Test PGx Actionability Triage")
         st.caption(
             "No genotype or phenotype data available. Tier 1 (Clinical Engine: "
-            "exact numeric labs) and Tier 2 (DDI Engine) combine here to answer "
-            "one question before any genetic test is ordered: is PGx testing "
-            "for this drug actually likely to change this patient's management?"
+            "exact numeric labs) and Tier 2 (DDI Engine) combine with the Layer "
+            "2 ADR risk flag above to answer one question before any genetic "
+            "test is ordered: is PGx testing for this drug actually likely to "
+            "change this patient's management?"
         )
 
         col1, col2 = st.columns(2)
@@ -349,6 +431,7 @@ with main_tab:
                 drug, concurrent_medications,
                 age=age, weight=weight, egfr=egfr, alt_ast=alt_ast,
                 platelets=platelets, pt_inr=pt_inr,
+                high_baseline_adr_risk=adr_result["high_baseline_adr_risk"],
             )
             st.session_state["triage_drug"] = drug
 
@@ -391,11 +474,14 @@ with main_tab:
                 st.markdown("**Clinical Engine (Routine Labs) Findings:**")
                 st.json(triage_result["clinical_findings"])
 
-            _similar_cases_expander(age, triage_drug, extra_context=f"triage: {triage_state}")
+            _similar_cases_expander(
+                age, triage_drug,
+                extra_context=f"triage: {triage_state}, {adr_result['adr_risk_flag']}",
+            )
 
 with audit_tab:
     st.subheader("Audit & Governance Log")
-    st.caption("Full history of clinician decisions on PRISM-India recommendations.")
+    st.caption("Full history of clinician decisions on PRISM-AIIMS recommendations.")
     logs_df = get_all_logs()
     if logs_df.empty:
         st.info("No decisions have been recorded yet.")

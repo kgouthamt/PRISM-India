@@ -19,11 +19,19 @@ Sources:
       x10^3/uL, PT/INR > 1.2) used before starting an anticoagulant.
     - Age/weight dosing context: FDA guidance on pediatric and weight-based
       dosing.
+    - Baseline ADR risk (Layer 2, calculate_adr_risk): Model A, a 9-predictor
+      institutional ADR risk model (6 of its 9 predictors are implemented in
+      this MVP), and Model B, the published GerontoNet ADR risk score
+      (Onder G, et al. "Development and validation of a score to assess risk
+      of adverse drug reactions among in-hospital patients 65 years or
+      older: the GerontoNet ADR risk score." Arch Intern Med. 2010).
 """
 
 KDIGO_SOURCE = "KDIGO 2024"
 NFI_SOURCE = "CDSCO / National Formulary of India"
 FDA_DOSING_SOURCE = "FDA Guidance (Pediatric / Weight-Based Dosing)"
+MODEL_A_SOURCE = "ADR Risk Predictor Model A (9-predictor institutional model; 6 predictors implemented)"
+GERONTONET_SOURCE = "GerontoNet ADR Risk Score (Onder et al., Arch Intern Med 2010)"
 
 EGFR_THRESHOLD = 60.0
 ALT_AST_THRESHOLD = 40.0
@@ -32,6 +40,14 @@ PT_INR_THRESHOLD = 1.2
 
 _PEDIATRIC_AGE_YEARS = 18
 _LOW_WEIGHT_KG = 40.0
+
+ELDERLY_AGE_THRESHOLD = 65.0
+
+POLYPHARMACY_DRUG_THRESHOLD = 4
+MULTI_PREDICTOR_THRESHOLD = 2
+
+ADR_RISK_HIGH = "HIGH BASELINE ADR RISK"
+ADR_RISK_STANDARD = "STANDARD"
 
 
 def assess_renal_function(egfr: float = None) -> dict:
@@ -146,3 +162,84 @@ def assess_age_weight_context(age: float = None, weight: float = None) -> dict:
     if weight is not None and weight < _LOW_WEIGHT_KG:
         flags.append(f"Low body weight ({weight} kg); confirm weight-based dose calculation")
     return {"age": age, "weight": weight, "flags": flags, "source": FDA_DOSING_SOURCE}
+
+
+def calculate_adr_risk(
+    *,
+    chronic_lung_disease: bool = False,
+    bleeding_or_gi_disorder: bool = False,
+    syncope_on_admission: bool = False,
+    on_antithrombotics: bool = False,
+    on_diuretics: bool = False,
+    on_raas_drugs: bool = False,
+    num_concurrent_drugs: int = 0,
+    history_of_adr: bool = False,
+    heart_failure: bool = False,
+    liver_disease: bool = False,
+    gt4_medical_conditions: bool = False,
+    renal_failure: bool = False,
+) -> dict:
+    """Layer 2: baseline Adverse Drug Reaction (ADR) risk, from two
+    predictor models -- entirely independent of any drug being requested or
+    any genotype/phenotype result.
+
+    Model A (institutional, 9 predictors -- 6 implemented here):
+        chronic_lung_disease, bleeding_or_gi_disorder, syncope_on_admission,
+        on_antithrombotics, on_diuretics, on_raas_drugs.
+
+    Model B (GerontoNet ADR risk score, 6 predictors):
+        num_concurrent_drugs, history_of_adr (the strongest single
+        predictor), heart_failure, liver_disease, gt4_medical_conditions,
+        renal_failure.
+
+    Returns "High Baseline ADR Risk" if ANY of the following hold:
+        - history_of_adr is True (the strongest single predictor), or
+        - num_concurrent_drugs > 4 (polypharmacy), or
+        - 2 or more Model A predictors are present, or
+        - 2 or more of the other GerontoNet predictors (heart_failure,
+          liver_disease, gt4_medical_conditions, renal_failure) are present.
+
+    Returns {"high_baseline_adr_risk", "adr_risk_flag", "model_a_trigger_count",
+    "gerontonet_trigger_count", "reasons", "source"}. `adr_risk_flag` is the
+    exact string persisted by storage.audit_logger and rendered in the UI --
+    ADR_RISK_HIGH or ADR_RISK_STANDARD.
+    """
+    model_a_predictors = [
+        chronic_lung_disease, bleeding_or_gi_disorder, syncope_on_admission,
+        on_antithrombotics, on_diuretics, on_raas_drugs,
+    ]
+    model_a_count = sum(1 for p in model_a_predictors if p)
+
+    gerontonet_secondary_predictors = [heart_failure, liver_disease, gt4_medical_conditions, renal_failure]
+    gerontonet_secondary_count = sum(1 for p in gerontonet_secondary_predictors if p)
+
+    num_concurrent_drugs = num_concurrent_drugs or 0
+    polypharmacy = num_concurrent_drugs > POLYPHARMACY_DRUG_THRESHOLD
+
+    reasons = []
+    if history_of_adr:
+        reasons.append("History of ADR (strongest single predictor, GerontoNet)")
+    if polypharmacy:
+        reasons.append(
+            f"Polypharmacy: {num_concurrent_drugs} concurrent drugs "
+            f"(> {POLYPHARMACY_DRUG_THRESHOLD})"
+        )
+    if model_a_count >= MULTI_PREDICTOR_THRESHOLD:
+        reasons.append(f"{model_a_count} Model A predictors present (threshold: {MULTI_PREDICTOR_THRESHOLD})")
+    if gerontonet_secondary_count >= MULTI_PREDICTOR_THRESHOLD:
+        reasons.append(
+            f"{gerontonet_secondary_count} GerontoNet predictors present "
+            f"(threshold: {MULTI_PREDICTOR_THRESHOLD})"
+        )
+
+    high_risk = bool(reasons)
+    gerontonet_trigger_count = gerontonet_secondary_count + int(history_of_adr) + int(polypharmacy)
+
+    return {
+        "high_baseline_adr_risk": high_risk,
+        "adr_risk_flag": ADR_RISK_HIGH if high_risk else ADR_RISK_STANDARD,
+        "model_a_trigger_count": model_a_count,
+        "gerontonet_trigger_count": gerontonet_trigger_count,
+        "reasons": reasons,
+        "source": f"{MODEL_A_SOURCE}; {GERONTONET_SOURCE}",
+    }
