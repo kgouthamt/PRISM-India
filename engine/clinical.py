@@ -213,7 +213,7 @@ def calculate_gerontonet_score(
     heart_failure: bool = False,
     liver_disease: bool = False,
     renal_failure: bool = False,
-    num_concurrent_drugs: int = 0,
+    num_drugs: int = 0,
     previous_adr_history: bool = False,
 ) -> dict:
     """The actual, validated GerontoNet ADR Risk Score (Onder et al., Arch
@@ -225,8 +225,8 @@ def calculate_gerontonet_score(
         Heart failure                  +1
         Liver disease                  +1
         Renal failure                  +1
-        5-7 concurrent drugs           +1
-        >= 8 concurrent drugs          +4 (supersedes the 5-7 band)
+        5-7 concurrent drugs (num_drugs) +1
+        >= 8 concurrent drugs (num_drugs) +4 (supersedes the 5-7 band)
         Previous history of ADR        +2
 
     `total_score` ranges 0-10. `risk_category` is GERONTONET_RISK_HIGH
@@ -239,10 +239,10 @@ def calculate_gerontonet_score(
     Returns {"total_score", "max_score", "risk_category", "breakdown", "source"}.
     `breakdown` maps each criterion to the points it actually contributed.
     """
-    num_concurrent_drugs = num_concurrent_drugs or 0
-    if num_concurrent_drugs >= 8:
+    num_drugs = num_drugs or 0
+    if num_drugs >= 8:
         drug_points = GERONTONET_DRUGS_8_PLUS_POINTS
-    elif num_concurrent_drugs >= 5:
+    elif num_drugs >= 5:
         drug_points = GERONTONET_DRUGS_5_TO_7_POINTS
     else:
         drug_points = 0
@@ -278,7 +278,7 @@ def calculate_adr_risk(
     antithrombotics: bool = False,
     diuretics: bool = False,
     raas_drugs: bool = False,
-    num_concurrent_drugs: int = 0,
+    num_drugs: int = 0,
     heart_failure: bool = False,
     liver_disease: bool = False,
     gte4_comorbid_conditions: bool = False,
@@ -303,7 +303,7 @@ def calculate_adr_risk(
     GerontoNet ADR Risk Score (chronic fragility and polypharmacy): the
     actual validated point total from calculate_gerontonet_score() --
     gte4_comorbid_conditions, heart_failure, liver_disease, renal_failure,
-    num_concurrent_drugs, previous_adr_history. High only at a total score
+    num_drugs, previous_adr_history. High only at a total score
     of 4 or more (see calculate_gerontonet_score for the point values).
 
     General clinical history (clinician-reported): allergy_history and
@@ -335,7 +335,7 @@ def calculate_adr_risk(
         heart_failure=heart_failure,
         liver_disease=liver_disease,
         renal_failure=renal_failure,
-        num_concurrent_drugs=num_concurrent_drugs,
+        num_drugs=num_drugs,
         previous_adr_history=previous_adr_history,
     )
 

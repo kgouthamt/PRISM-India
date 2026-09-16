@@ -434,7 +434,7 @@ with tab1:
                     "below. Scored using the actual validated GerontoNet point "
                     "weights, not a simple predictor count."
                 )
-                num_concurrent_drugs = st.number_input(
+                num_drugs = st.number_input(
                     "Number of concurrent drugs", min_value=0, max_value=30, value=0, step=1
                 )
                 heart_failure = st.checkbox("Heart failure")
@@ -461,7 +461,7 @@ with tab1:
             antithrombotics=antithrombotics,
             diuretics=diuretics,
             raas_drugs=raas_drugs,
-            num_concurrent_drugs=num_concurrent_drugs,
+            num_drugs=num_drugs,
             heart_failure=heart_failure,
             liver_disease=liver_disease,
             gte4_comorbid_conditions=gte4_comorbid_conditions,

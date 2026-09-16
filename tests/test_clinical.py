@@ -175,23 +175,23 @@ class TestGerontoNetScoreMath(unittest.TestCase):
         self.assertEqual(result["breakdown"]["previous_adr_history"], 2)
 
     def test_four_concurrent_drugs_is_zero_points(self):
-        result = calculate_gerontonet_score(num_concurrent_drugs=4)
+        result = calculate_gerontonet_score(num_drugs=4)
         self.assertEqual(result["breakdown"]["concurrent_drugs"], 0)
 
     def test_five_concurrent_drugs_is_one_point(self):
-        result = calculate_gerontonet_score(num_concurrent_drugs=5)
+        result = calculate_gerontonet_score(num_drugs=5)
         self.assertEqual(result["breakdown"]["concurrent_drugs"], 1)
 
     def test_seven_concurrent_drugs_is_one_point(self):
-        result = calculate_gerontonet_score(num_concurrent_drugs=7)
+        result = calculate_gerontonet_score(num_drugs=7)
         self.assertEqual(result["breakdown"]["concurrent_drugs"], 1)
 
     def test_eight_concurrent_drugs_is_four_points(self):
-        result = calculate_gerontonet_score(num_concurrent_drugs=8)
+        result = calculate_gerontonet_score(num_drugs=8)
         self.assertEqual(result["breakdown"]["concurrent_drugs"], 4)
 
     def test_twenty_concurrent_drugs_is_still_four_points(self):
-        result = calculate_gerontonet_score(num_concurrent_drugs=20)
+        result = calculate_gerontonet_score(num_drugs=20)
         self.assertEqual(result["breakdown"]["concurrent_drugs"], 4)
 
     def test_previous_adr_history_alone_is_not_high_risk(self):
@@ -228,7 +228,7 @@ class TestGerontoNetScoreMath(unittest.TestCase):
     def test_max_score_is_ten(self):
         result = calculate_gerontonet_score(
             gte4_comorbid_conditions=True, heart_failure=True, liver_disease=True,
-            renal_failure=True, num_concurrent_drugs=8, previous_adr_history=True,
+            renal_failure=True, num_drugs=8, previous_adr_history=True,
         )
         self.assertEqual(result["total_score"], 10)
         self.assertEqual(result["max_score"], 10)
