@@ -248,6 +248,67 @@ def _alert_card(level: str, title: str, body_html: str) -> None:
     )
 
 
+# Illustrative placeholder priors only -- NOT derived from an actual
+# GenomeIndia data release. Each entry models, for demonstration purposes,
+# how a population-level allele-frequency prior might differ between a
+# GenomeIndia-style reference cohort and a global reference cohort for the
+# variant class each MVP drug's actionability relationship depends on.
+GENOMEINDIA_PGX_PRIORS = {
+    "clopidogrel": {
+        "gene_variant": "CYP2C19 loss-of-function alleles (*2 / *3)",
+        "genomeindia_prior": 0.35,
+        "global_reference_prior": 0.30,
+    },
+    "tacrolimus": {
+        "gene_variant": "CYP3A5 expresser allele (*1)",
+        "genomeindia_prior": 0.55,
+        "global_reference_prior": 0.35,
+    },
+    "warfarin": {
+        "gene_variant": "VKORC1 sensitivity allele (-1639A)",
+        "genomeindia_prior": 0.72,
+        "global_reference_prior": 0.40,
+    },
+}
+
+
+def _population_aware_pgx_context(drug: str) -> None:
+    """Illustrative-only prototype: shows how a population allele-frequency
+    prior (a mock GenomeIndia-style dataset) would contextualize the prior
+    probability of an actionable variant for the requested drug, before any
+    individual genotype is observed. Every number here is a placeholder for
+    demonstration -- this function makes no claim to represent real,
+    published allele frequencies, and never substitutes for an individual
+    genotype result.
+    """
+    with st.expander("🧬 Population-Aware PGx Context (GenomeIndia Prototype)"):
+        prior = GENOMEINDIA_PGX_PRIORS.get((drug or "").strip().lower())
+        if prior is None:
+            st.caption(
+                "No population-frequency prior is modeled for this drug in "
+                "the current prototype scope."
+            )
+        else:
+            st.caption(
+                "Illustrative placeholder values only -- not sourced from an "
+                "actual GenomeIndia data release."
+            )
+            prior_col, reference_col = st.columns(2)
+            prior_col.metric(
+                f"{prior['gene_variant']} — GenomeIndia prior",
+                f"{prior['genomeindia_prior']:.0%}",
+            )
+            reference_col.metric(
+                f"{prior['gene_variant']} — Global reference prior",
+                f"{prior['global_reference_prior']:.0%}",
+            )
+        st.warning(
+            "Population-level frequencies act as contextual modifiers for "
+            "prior probability; they cannot determine an individual's "
+            "genotype and do not replace clinical prescribing guidelines."
+        )
+
+
 def _similar_cases_sidebar_panel() -> None:
     with st.sidebar:
         st.markdown("---")
@@ -677,10 +738,10 @@ with tab1:
                     for warning_text in triage_result["warnings"]:
                         st.error(warning_text)
 
-                general_adr_risk = triage_result.get("general_adr_risk")
-                if general_adr_risk:
-                    st.markdown("**General ADR Risk (Patient Fragility -- kept separate from PGx Actionability):**")
-                    st.info(general_adr_risk["note"])
+                contextual_modifier = triage_result.get("contextual_modifier")
+                if contextual_modifier:
+                    st.markdown("**Contextual Modifier (Layer 2 Baseline ADR Risk Covariate):**")
+                    st.info(contextual_modifier["note"])
 
                 if triage_result["ddi_findings"]:
                     st.markdown("**Drug-Drug Interaction (DDI Engine) Findings:**")
@@ -696,6 +757,8 @@ with tab1:
                 if triage_result["clinical_findings"]:
                     st.markdown("**Clinical Engine (Routine Labs) Findings:**")
                     st.json(triage_result["clinical_findings"])
+
+                _population_aware_pgx_context(triage_drug)
 
 _similar_cases_sidebar_panel()
 

@@ -1,4 +1,4 @@
-"""Unit tests for engine.triage (PGx Actionability Triage).
+"""Unit tests for engine.triage (PGx Testing-Priority Triage).
 
 Covers only objective, routine inputs (drug, exact numeric labs, DDIs,
 age/weight) -- there is deliberately no test exercising a "previous ADR" or
@@ -6,15 +6,17 @@ age/weight) -- there is deliberately no test exercising a "previous ADR" or
 no such parameter to begin with (only the pre-computed high_baseline_adr_risk
 boolean crosses in from engine.clinical.calculate_adr_risk).
 
-Also asserts, per clinical reviewer feedback:
-    - the new lab-abnormality threshold logic (renal_function_status /
+Also asserts, per the integrated decision-matrix architecture:
+    - the lab-abnormality threshold logic (renal_function_status /
       transaminase_status / coagulation_cbc_status, surfaced via
       clinical_findings) never claims a diagnosis, only a lab abnormality;
-    - the exact GerontoNet mathematical scoring that feeds
-      high_baseline_adr_risk upstream; and
-    - that general ADR risk and PGx actionability are two distinct,
-      separately reported conceptual outputs (`general_adr_risk` vs.
-      `triage`/`rationale`).
+    - Testing Priority = f(PGx Actionability, Patient-Specific Clinical
+      Context) resolves deterministically via the decision matrix; and
+    - baseline ADR risk (Layer 2) is an orthogonal covariate that is
+      reported separately (`contextual_modifier`) and never independently
+      transitions the priority state for any drug -- only a
+      pathway-intersecting clinical context (a severe DDI, or an extreme
+      lab value tied to the drug's own mechanism) can do that.
 """
 
 import unittest
@@ -147,86 +149,93 @@ class TestNoneValuesNeverCrash(unittest.TestCase):
                     high_baseline_adr_risk=adr_flag,
                 )
                 self.assertIn("triage", result)
-                self.assertIn("general_adr_risk", result)
+                self.assertIn("contextual_modifier", result)
 
 
-class TestGeneralAdrRiskIsDistinctFromPgxActionability(unittest.TestCase):
-    """General ADR risk (patient fragility) and PGx actionability (this
-    drug's genetic testing priority) are two distinct conceptual outputs,
-    per clinical reviewer feedback -- never conflated into one field."""
+class TestBaselineAdrRiskIsAnOrthogonalCovariate(unittest.TestCase):
+    """Baseline ADR risk (patient fragility) and PGx actionability (this
+    drug's genetic testing priority) are two distinct conceptual outputs.
+    Per the integrated decision-matrix architecture, baseline ADR risk is
+    an orthogonal covariate that never independently transitions the
+    priority state for any drug -- only a pathway-intersecting clinical
+    context can do that."""
 
-    def test_standard_adr_risk_note_and_no_amplification(self):
+    def test_standard_adr_risk_note_and_no_state_transition(self):
         result = triage_pgx_actionability("Warfarin", age=70, high_baseline_adr_risk=False)
-        general = result["general_adr_risk"]
-        self.assertFalse(general["high_baseline_adr_risk"])
-        self.assertFalse(general["amplifies_pgx_triage"])
+        modifier = result["contextual_modifier"]
+        self.assertFalse(modifier["high_baseline_adr_risk"])
+        self.assertFalse(modifier["state_transition_applied"])
 
-    def test_warfarin_elderly_high_risk_amplifies_and_is_reported_separately(self):
+    def test_warfarin_high_adr_risk_never_escalates_even_when_elderly(self):
+        # This is the corrected behavior: a high baseline ADR risk score
+        # must NOT independently force Warfarin to HIGH PRIORITY, even for
+        # an elderly patient -- only a pathway-intersecting condition
+        # (severe DDI, abnormal coagulation) may do that.
         result = triage_pgx_actionability(
             "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
             high_baseline_adr_risk=True,
         )
-        self.assertEqual(result["triage"], TRIAGE_HIGH)
-        general = result["general_adr_risk"]
-        self.assertTrue(general["high_baseline_adr_risk"])
-        self.assertTrue(general["amplifies_pgx_triage"])
-        # The amplification reasoning lives in general_adr_risk's note, not
-        # smuggled into the drug-specific `rationale` list.
-        self.assertFalse(any("General Clinical History" in line for line in result["rationale"]))
+        self.assertEqual(result["triage"], TRIAGE_CONSIDER)
+        modifier = result["contextual_modifier"]
+        self.assertTrue(modifier["high_baseline_adr_risk"])
+        self.assertFalse(modifier["state_transition_applied"])
+        # Strong clinical warnings must still accompany the CONSIDER output.
+        self.assertTrue(any("Baseline ADR risk is elevated" in w for w in result["warnings"]))
 
-    def test_warfarin_non_elderly_high_risk_does_not_amplify(self):
+    def test_warfarin_high_adr_risk_non_elderly_also_never_escalates(self):
         result = triage_pgx_actionability(
             "Warfarin", [], age=40, platelets=250, pt_inr=1.0,
             high_baseline_adr_risk=True,
         )
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
-        general = result["general_adr_risk"]
-        self.assertTrue(general["high_baseline_adr_risk"])
-        self.assertFalse(general["amplifies_pgx_triage"])
+        self.assertFalse(result["contextual_modifier"]["state_transition_applied"])
 
-    def test_warfarin_elderly_but_standard_adr_risk_does_not_escalate(self):
-        result = triage_pgx_actionability(
-            "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
-            high_baseline_adr_risk=False,
-        )
-        self.assertEqual(result["triage"], TRIAGE_CONSIDER)
-        self.assertFalse(result["general_adr_risk"]["amplifies_pgx_triage"])
-
-    def test_warfarin_elderly_with_missing_age_never_crashes_or_amplifies(self):
+    def test_warfarin_high_adr_risk_with_missing_age_never_crashes_or_escalates(self):
         result = triage_pgx_actionability(
             "Warfarin", [], age=None, platelets=250, pt_inr=1.0,
             high_baseline_adr_risk=True,
         )
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
-        self.assertFalse(result["general_adr_risk"]["amplifies_pgx_triage"])
+        self.assertFalse(result["contextual_modifier"]["state_transition_applied"])
 
-    def test_clopidogrel_high_adr_risk_never_amplifies_but_is_reported(self):
+    def test_warfarin_pathway_intersecting_context_still_escalates_regardless_of_adr_risk(self):
+        # A pathway-intersecting context (abnormal coagulation) must still
+        # escalate to HIGH PRIORITY, independent of the ADR risk covariate.
+        for adr_flag in (True, False):
+            result = triage_pgx_actionability(
+                "Warfarin", [], platelets=100, pt_inr=1.0,
+                high_baseline_adr_risk=adr_flag,
+            )
+            self.assertEqual(result["triage"], TRIAGE_HIGH)
+
+    def test_clopidogrel_high_adr_risk_never_transitions_state_but_is_reported(self):
         result = triage_pgx_actionability("Clopidogrel", high_baseline_adr_risk=True)
         self.assertEqual(result["triage"], TRIAGE_HIGH)
-        general = result["general_adr_risk"]
-        self.assertTrue(general["high_baseline_adr_risk"])
-        self.assertFalse(general["amplifies_pgx_triage"])
-        self.assertIn("does not change PGx triage priority", general["note"])
+        modifier = result["contextual_modifier"]
+        self.assertTrue(modifier["high_baseline_adr_risk"])
+        self.assertFalse(modifier["state_transition_applied"])
+        self.assertIn("priority state is unaffected", modifier["note"])
 
-    def test_tacrolimus_high_adr_risk_never_amplifies_but_is_reported(self):
+    def test_tacrolimus_high_adr_risk_never_transitions_state_but_is_reported(self):
         result = triage_pgx_actionability("Tacrolimus", high_baseline_adr_risk=True)
         self.assertEqual(result["triage"], TRIAGE_HIGH)
-        general = result["general_adr_risk"]
-        self.assertTrue(general["high_baseline_adr_risk"])
-        self.assertFalse(general["amplifies_pgx_triage"])
+        modifier = result["contextual_modifier"]
+        self.assertTrue(modifier["high_baseline_adr_risk"])
+        self.assertFalse(modifier["state_transition_applied"])
 
-    def test_out_of_scope_drug_still_reports_general_adr_risk(self):
+    def test_out_of_scope_drug_still_reports_contextual_modifier(self):
         result = triage_pgx_actionability("Ibuprofen", high_baseline_adr_risk=True)
-        self.assertIn("general_adr_risk", result)
-        self.assertFalse(result["general_adr_risk"]["amplifies_pgx_triage"])
+        self.assertIn("contextual_modifier", result)
+        self.assertFalse(result["contextual_modifier"]["state_transition_applied"])
 
 
-class TestGerontoNetScoreFeedsWarfarinAmplification(unittest.TestCase):
-    """End-to-end: the actual GerontoNet math (via calculate_adr_risk) drives
-    the same Warfarin amplification path exercised above -- not a mocked
-    boolean, but the real upstream computation."""
+class TestGerontoNetScoreNeverEscalatesWarfarinAlone(unittest.TestCase):
+    """End-to-end: even a maximal, real GerontoNet/ADATIP-driven baseline
+    ADR risk verdict (via calculate_adr_risk) must not, by itself, force
+    Warfarin's priority state to HIGH -- it is an orthogonal covariate, not
+    a value of Patient-Specific Clinical Context."""
 
-    def test_score_of_four_from_elderly_patient_escalates_warfarin(self):
+    def test_high_gerontonet_score_appended_to_warfarin_yields_consider_with_warnings(self):
         adr = calculate_adr_risk(
             previous_adr_history=True, heart_failure=True, liver_disease=True,
         )
@@ -238,12 +247,24 @@ class TestGerontoNetScoreFeedsWarfarinAmplification(unittest.TestCase):
             "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
             high_baseline_adr_risk=adr["high_baseline_adr_risk"],
         )
-        self.assertEqual(result["triage"], TRIAGE_HIGH)
+        self.assertEqual(result["triage"], TRIAGE_CONSIDER)
+        self.assertTrue(len(result["warnings"]) >= 1)
 
-    def test_previous_adr_history_alone_does_not_escalate_warfarin(self):
-        # 2 points alone is Low Risk under the real GerontoNet math, so the
-        # composite flag is Standard and Warfarin must not escalate purely
-        # from age -- this is the corrected behavior post-review.
+    def test_high_adatip_score_appended_to_warfarin_yields_consider_with_warnings(self):
+        adr = calculate_adr_risk(
+            age=70, syncope_on_admission=True, raas_drugs=True,
+        )
+        self.assertGreaterEqual(adr["adatip_trigger_count"], 2)
+        self.assertTrue(adr["high_baseline_adr_risk"])
+
+        result = triage_pgx_actionability(
+            "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
+            high_baseline_adr_risk=adr["high_baseline_adr_risk"],
+        )
+        self.assertEqual(result["triage"], TRIAGE_CONSIDER)
+        self.assertTrue(len(result["warnings"]) >= 1)
+
+    def test_previous_adr_history_alone_is_low_risk_and_does_not_escalate_warfarin(self):
         adr = calculate_adr_risk(previous_adr_history=True)
         self.assertEqual(adr["gerontonet_score"]["risk_category"], GERONTONET_RISK_LOW)
         self.assertFalse(adr["high_baseline_adr_risk"])
