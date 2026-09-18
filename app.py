@@ -14,10 +14,16 @@ from engine.rules import (
     RULE_VERSION,
     evaluate_prescription,
 )
-from engine.triage import TRIAGE_CONSIDER, TRIAGE_HIGH, triage_pgx_actionability
+from engine.triage import (
+    ETHNICITY_OPTIONS,
+    TRIAGE_CONSIDER,
+    TRIAGE_HIGH,
+    genomeindia_population_priority,
+    triage_pgx_actionability,
+)
 from storage.audit_logger import get_all_logs, log_decision
 
-SOFTWARE_VERSION = "PRISM-AIIMS v7.0.0"
+SOFTWARE_VERSION = "PRISM-AIIMS v8.0.0"
 
 st.set_page_config(page_title="PRISM-AIIMS", layout="wide")
 
@@ -94,11 +100,7 @@ DRUG_OPTIONS = [
     "Rasburicase",
 ]
 
-DIAGNOSTIC_DATA_OPTIONS = [
-    "Genotype Data",
-    "Phenotype / TDM Data",
-    "None of the above (Run Triage)",
-]
+GENOTYPING_AVAILABILITY_OPTIONS = ["Available", "Not Available"]
 
 VERIFICATION_STATUS_OPTIONS = [
     "Verified",
@@ -164,7 +166,7 @@ def _render_test_result_input(drug: str, test_type: str):
                 disabled=True,
                 help="Routine PT/INR monitoring, not a phenotype rule, governs "
                      "warfarin's day-to-day titration in this MVP; select "
-                     "'None of the above (Run Triage)' above instead.",
+                     "'Genotype' as the Result Type above instead.",
             )
             return None
         col_a, col_b = st.columns(2)
@@ -181,7 +183,7 @@ def _render_test_result_input(drug: str, test_type: str):
             ["Not applicable for this drug / test-type combination"],
             disabled=True,
             help="No CPIC rule is defined for this combination; switch "
-                 "Diagnostic Data Available above.",
+                 "Result Type above.",
         )
         return None
     if spec["type"] == "select":
@@ -193,20 +195,23 @@ def _render_test_result_input(drug: str, test_type: str):
     return str(value)
 
 
-def _lab_value_with_unknown_checkbox(label, min_value, max_value, default_value, step, key):
-    """Render a number_input paired with a 'Test Not Done / Unknown' checkbox.
+_LAB_FLAG_OPTIONS = ["Missing Data", "Normal", "Abnormal"]
+_LAB_FLAG_STATE = {"Missing Data": None, "Normal": False, "Abnormal": True}
 
-    Returns the numeric value, or None if the checkbox is checked -- the
-    None is what actually reaches the Clinical Engine (the `disabled`
-    number_input keeps its last value internally, but that value is
-    discarded here rather than passed through).
+
+def _lab_flag_input(label: str, key: str):
+    """Render a strict three-valued state selector for a single Layer 1
+    laboratory parameter: True (Abnormal), False (Normal), or None (Missing
+    Data) -- never a raw numeric reading. Selecting Abnormal immediately
+    transitions this parameter's backend state to ABNORMAL -> FLAG the
+    instant the widget resolves; there is no intermediate numeric
+    comparison anywhere downstream of this function.
     """
-    unknown = st.checkbox("Test Not Done / Unknown", key=f"{key}_unknown")
-    value = st.number_input(
-        label, min_value=min_value, max_value=max_value, value=default_value,
-        step=step, disabled=unknown, key=f"{key}_value",
-    )
-    return None if unknown else value
+    choice = st.radio(label, _LAB_FLAG_OPTIONS, horizontal=True, key=key)
+    flag = _LAB_FLAG_STATE[choice]
+    if flag is True:
+        st.error(f"ABNORMAL → FLAG: {label}")
+    return flag
 
 
 TACROLIMUS_INDICATION_OPTIONS = ["Kidney Transplant", "Liver Transplant", "Other / Unspecified"]
@@ -248,65 +253,40 @@ def _alert_card(level: str, title: str, body_html: str) -> None:
     )
 
 
-# Illustrative placeholder priors only -- NOT derived from an actual
-# GenomeIndia data release. Each entry models, for demonstration purposes,
-# how a population-level allele-frequency prior might differ between a
-# GenomeIndia-style reference cohort and a global reference cohort for the
-# variant class each MVP drug's actionability relationship depends on.
-GENOMEINDIA_PGX_PRIORS = {
-    "clopidogrel": {
-        "gene_variant": "CYP2C19 loss-of-function alleles (*2 / *3)",
-        "genomeindia_prior": 0.35,
-        "global_reference_prior": 0.30,
-    },
-    "tacrolimus": {
-        "gene_variant": "CYP3A5 expresser allele (*1)",
-        "genomeindia_prior": 0.55,
-        "global_reference_prior": 0.35,
-    },
-    "warfarin": {
-        "gene_variant": "VKORC1 sensitivity allele (-1639A)",
-        "genomeindia_prior": 0.72,
-        "global_reference_prior": 0.40,
-    },
+_MOCK_CASE_REPORT_QUERIES = {
+    "ADR Risk": "https://pubmed.ncbi.nlm.nih.gov/?term=adverse+drug+reaction+case+report",
+    "Family Risk": "https://pubmed.ncbi.nlm.nih.gov/?term=familial+pharmacogenomic+risk+case+report",
+    "Allergic Risk": "https://pubmed.ncbi.nlm.nih.gov/?term=drug+allergy+case+report",
 }
 
 
-def _population_aware_pgx_context(drug: str) -> None:
-    """Illustrative-only prototype: shows how a population allele-frequency
-    prior (a mock GenomeIndia-style dataset) would contextualize the prior
-    probability of an actionable variant for the requested drug, before any
-    individual genotype is observed. Every number here is a placeholder for
-    demonstration -- this function makes no claim to represent real,
-    published allele frequencies, and never substitutes for an individual
-    genotype result.
+def _web_search_mockup(adatip_high: bool, allergy_history: bool, family_history: bool) -> None:
+    """Layer 2's Web Search mockup: three independent literature queries,
+    one per risk dimension (ADR Risk, Family Risk, Allergic Risk), each
+    evaluated against its own boolean input variable rather than a single
+    combined flag. No live search is performed server-side by PRISM-AIIMS
+    itself -- each query term links out to a real PubMed search so a
+    clinician can inspect actual literature, but the case counts below are
+    illustrative placeholders, not the result of an executed search.
     """
-    with st.expander("🧬 Population-Aware PGx Context (GenomeIndia Prototype)"):
-        prior = GENOMEINDIA_PGX_PRIORS.get((drug or "").strip().lower())
-        if prior is None:
-            st.caption(
-                "No population-frequency prior is modeled for this drug in "
-                "the current prototype scope."
-            )
-        else:
-            st.caption(
-                "Illustrative placeholder values only -- not sourced from an "
-                "actual GenomeIndia data release."
-            )
-            prior_col, reference_col = st.columns(2)
-            prior_col.metric(
-                f"{prior['gene_variant']} — GenomeIndia prior",
-                f"{prior['genomeindia_prior']:.0%}",
-            )
-            reference_col.metric(
-                f"{prior['gene_variant']} — Global reference prior",
-                f"{prior['global_reference_prior']:.0%}",
-            )
-        st.warning(
-            "Population-level frequencies act as contextual modifiers for "
-            "prior probability; they cannot determine an individual's "
-            "genotype and do not replace clinical prescribing guidelines."
+    st.markdown("**Web Search — Related Case Reports (Prototype)**")
+    query_flags = {
+        "ADR Risk": adatip_high,
+        "Family Risk": family_history,
+        "Allergic Risk": allergy_history,
+    }
+    for label, flag in query_flags.items():
+        case_count = 4 if flag else 1
+        url = _MOCK_CASE_REPORT_QUERIES[label]
+        st.markdown(
+            f"Querying literature for “{label}”... found {case_count} "
+            f"similar case report(s). [Search PubMed]({url})"
         )
+    st.caption(
+        "This preview's case counts are generated locally for demonstration "
+        "purposes; PRISM-AIIMS performs no server-side literature search of "
+        "its own."
+    )
 
 
 def _similar_cases_sidebar_panel() -> None:
@@ -317,8 +297,8 @@ def _similar_cases_sidebar_panel() -> None:
         drug_val = st.session_state.get("requested_drug")
         if age_val is None or drug_val is None:
             st.caption(
-                "Complete Patient Baseline & Vitals and Pharmacogenomic (PGx) "
-                "Triage above to preview literature matches here."
+                "Complete Layer 1 and Layer 3 above to preview literature "
+                "matches here."
             )
             return
 
@@ -405,28 +385,21 @@ def _log_and_export(clinician_decision: str, override_reason: str = None) -> Non
 
 
 with tab1:
-    patient_id = st.text_input("Patient ID (Medical Record Number)", placeholder="e.g. PT-1001")
-
-    st.header("Patient Baseline & Vitals")
+    st.header("Layer 1: Clinical Details")
     with st.container(border=True):
         st.markdown("**Demographics**")
         col1, col2, col3 = st.columns(3)
         with col1:
             patient_name = st.text_input("Name", placeholder="e.g. Ramesh Kumar")
         with col2:
-            age = st.number_input("Age (years)", min_value=0, max_value=120, value=40, step=1)
+            patient_id = st.text_input("Patient ID (Medical Record Number)", placeholder="e.g. PT-1001")
         with col3:
-            address = st.text_input("Address", placeholder="e.g. New Delhi, India")
-
-        st.markdown("**Anthropometrics**")
-        col4, col5 = st.columns(2)
-        with col4:
-            height = st.number_input("Height (cm)", min_value=0.0, max_value=250.0, value=165.0, step=0.5)
-        with col5:
-            weight = st.number_input("Weight (kg)", min_value=0.0, max_value=250.0, value=70.0, step=0.5)
+            age = st.number_input("Age (years)", min_value=0, max_value=120, value=40, step=1)
 
         st.markdown("**Vitals**")
-        vcol1, vcol2, vcol3, vcol4, vcol5, vcol6 = st.columns(6)
+        vcol0, vcol1, vcol2, vcol3, vcol4, vcol5, vcol6 = st.columns(7)
+        with vcol0:
+            weight = st.number_input("Weight (kg)", min_value=0.0, max_value=250.0, value=70.0, step=0.5)
         with vcol1:
             pulse_rate = st.number_input("PR (bpm)", min_value=0, max_value=250, value=80, step=1)
         with vcol2:
@@ -440,7 +413,6 @@ with tab1:
         with vcol6:
             temperature = st.number_input("Temp (°F)", min_value=80.0, max_value=115.0, value=98.6, step=0.1)
 
-        st.markdown("**Vitals Monitor**")
         mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
         mcol1.metric(
             "Pulse Rate", f"{pulse_rate} bpm",
@@ -458,21 +430,37 @@ with tab1:
             delta=("Fever" if temperature >= 100.4 else None), delta_color="inverse",
         )
 
+        st.markdown("**Laboratory Data**")
+        st.caption(
+            "Each parameter is a strict three-valued state -- Abnormal "
+            "(True), Normal (False), or Missing Data (None). This boolean/"
+            "None flag, not a numeric reading, is what crosses into the "
+            "backend state machine below. Marking a parameter Abnormal "
+            "immediately transitions it to its ABNORMAL → FLAG state."
+        )
+        lab_col1, lab_col2 = st.columns(2)
+        with lab_col1:
+            egfr_abnormal = _lab_flag_input("eGFR (Renal Function)", key="egfr_flag")
+            alt_ast_abnormal = _lab_flag_input("ALT/AST (Hepatic Function)", key="alt_ast_flag")
+        with lab_col2:
+            platelets_abnormal = _lab_flag_input("Platelets (Coagulation/CBC)", key="platelets_flag")
+            pt_inr_abnormal = _lab_flag_input("PT/INR (Coagulation/CBC)", key="pt_inr_flag")
+
     st.session_state["patient_age"] = age
 
-    st.header("Clinical Risk Assessment")
+    st.header("Layer 2: ADR Risk Prediction")
     with st.container(border=True):
         st.caption(
-            "Evaluates systemic patient vulnerability using the ADATIP "
-            "9-Predictor Model (acute presentation) and the GerontoNet Risk "
-            "Score (chronic fragility and polypharmacy) -- entirely "
-            "independent of the drug being requested."
+            "ADATIP and GerontoNet are evaluated as isolated execution "
+            "contexts -- two statistically independent predictor sets over "
+            "the same patient, each producing its own verdict below, with "
+            "neither computation observing the other's internal state."
         )
         adatip_col, gerontonet_col = st.columns(2)
         with adatip_col:
             with st.container(border=True):
-                st.markdown("**ADATIP 9-Predictor Model**")
-                st.caption(f"Age (from Patient Baseline & Vitals): {age} years")
+                st.markdown("**ADATIP 9-Predictor Model (Isolated Context)**")
+                st.caption(f"Age (from Layer 1): {age} years")
                 chronic_lung_disease = st.checkbox("Chronic lung disease")
                 presenting_respiratory_disorder = st.checkbox(
                     "Primary presenting complaints of respiratory disorders"
@@ -489,7 +477,7 @@ with tab1:
                 raas_drugs = st.checkbox("RAAS drugs")
         with gerontonet_col:
             with st.container(border=True):
-                st.markdown("**GerontoNet Risk Score**")
+                st.markdown("**GerontoNet Risk Score (Isolated Context)**")
                 st.caption(
                     "History of ADR is captured under General Clinical History "
                     "below. Scored using the actual validated GerontoNet point "
@@ -541,20 +529,29 @@ with tab1:
         )
         category_col.metric("GerontoNet Risk Category", gerontonet_score["risk_category"])
 
-        if adr_result["high_baseline_adr_risk"]:
-            reasons_html = html.escape("; ".join(adr_result["reasons"]))
+        st.markdown("---")
+        verdict_col1, verdict_col2 = st.columns(2)
+        adatip_high = adr_result["adatip_isolated_verdict"] == "High Risk"
+        gerontonet_high = adr_result["gerontonet_isolated_verdict"] == "High Risk"
+        with verdict_col1:
+            banner_class = "adr-banner-high" if adatip_high else "adr-banner-standard"
             st.markdown(
-                f"<div class='adr-banner adr-banner-high'>"
-                f"{html.escape(adr_result['adr_risk_flag'])} — {reasons_html}</div>",
+                f"<div class='adr-banner {banner_class}'>ADR in acute vulnerable patient: "
+                f"{html.escape(adr_result['adatip_isolated_verdict'])}</div>",
                 unsafe_allow_html=True,
             )
-        else:
+        with verdict_col2:
+            banner_class = "adr-banner-high" if gerontonet_high else "adr-banner-standard"
             st.markdown(
-                "<div class='adr-banner adr-banner-standard'>Standard baseline ADR risk</div>",
+                f"<div class='adr-banner {banner_class}'>ADR in chronic fragility: "
+                f"{html.escape(adr_result['gerontonet_isolated_verdict'])}</div>",
                 unsafe_allow_html=True,
             )
 
-    st.header("Pharmacogenomic (PGx) Triage")
+        st.markdown("")
+        _web_search_mockup(adatip_high, allergy_history, family_history)
+
+    st.header("Layer 3: Pharmacogenomics")
     with st.container(border=True):
         col_drug, col_meds = st.columns(2)
         with col_drug:
@@ -573,14 +570,19 @@ with tab1:
             "comprehensive interaction checker."
         )
 
-        diagnostic_data_choice = st.radio("Diagnostic Data Available:", DIAGNOSTIC_DATA_OPTIONS, horizontal=True)
+        genotyping_available = st.radio(
+            "Genotyping Results:", GENOTYPING_AVAILABILITY_OPTIONS, horizontal=True
+        )
 
-    if diagnostic_data_choice in ("Genotype Data", "Phenotype / TDM Data"):
-        # Path A: a PGx test result already exists -- go straight to interpretation.
-        test_type = "Genotype" if diagnostic_data_choice == "Genotype Data" else "Phenotype"
-
+    if genotyping_available == "Available":
+        # Path A: a PGx result already exists -- go straight to the
+        # standard CPIC allele pathway lookup.
         with st.container(border=True):
-            st.subheader("Genotype / Phenotype Evaluation")
+            st.subheader("CPIC Allele Pathway Lookup")
+            result_type_choice = st.radio(
+                "Result Type:", ["Genotype", "Phenotype / TDM"], horizontal=True
+            )
+            test_type = "Genotype" if result_type_choice == "Genotype" else "Phenotype"
             test_result = _render_test_result_input(drug, test_type)
             clinical_context = _render_clinical_context_inputs(drug, test_type)
             evaluate_clicked = st.button("Evaluate", type="primary")
@@ -591,6 +593,7 @@ with tab1:
                 else:
                     result = evaluate_prescription(drug, test_type, test_result, **clinical_context)
                     st.session_state["result"] = result
+                    st.session_state["triage_result"] = None
                     st.session_state["eval_context"] = {
                         "patient_id": patient_id.strip(),
                         "drug": drug,
@@ -601,7 +604,6 @@ with tab1:
                         "evidence_date": result.get("evidence_date"),
                         "rule_hash": result.get("rule_hash"),
                     }
-                    st.session_state["show_override"] = False
                     st.session_state["fhir_bundle"] = None
 
             result = st.session_state.get("result")
@@ -617,23 +619,6 @@ with tab1:
                         f"<b>Recommended Action &amp; Dosage:</b> "
                         f"{html.escape(result['recommendation_and_dosage'])}",
                     )
-
-                    col_accept, col_override = st.columns(2)
-                    with col_accept:
-                        if st.button("Accept"):
-                            _log_and_export("ACCEPTED")
-                    with col_override:
-                        if st.button("Override"):
-                            st.session_state["show_override"] = True
-
-                    if st.session_state.get("show_override"):
-                        justification = st.text_area("Clinical Justification for Override")
-                        if st.button("Submit Override"):
-                            if justification.strip():
-                                _log_and_export("OVERRIDDEN", justification.strip())
-                            else:
-                                st.info("Please provide a justification before submitting the override.")
-
                 elif result["risk"] == RISK_NO_ALERT:
                     _alert_card(
                         "low", "NO ACTIONABLE ALERT",
@@ -641,9 +626,6 @@ with tab1:
                         f"<b>Recommended Action &amp; Dosage:</b> "
                         f"{html.escape(result['recommendation_and_dosage'])}",
                     )
-                    if st.button("Accept"):
-                        _log_and_export("ACCEPTED")
-
                 else:
                     _alert_card("info", "INFORMATION", html.escape(result["reason"]))
 
@@ -653,61 +635,58 @@ with tab1:
                         f"Evidence date: {result.get('evidence_date')} | "
                         f"Rule hash: {result.get('rule_hash')}"
                     )
-
-                fhir_bundle = st.session_state.get("fhir_bundle")
-                if fhir_bundle:
-                    with st.expander("FHIR R4 / ABDM-aligned Interoperability Record"):
-                        st.json(fhir_bundle)
-                        st.download_button(
-                            "Download FHIR Bundle (JSON)",
-                            data=json.dumps(fhir_bundle, indent=2),
-                            file_name=f"fhir_bundle_{st.session_state['eval_context']['patient_id']}.json",
-                            mime="application/json",
-                        )
+                st.caption(
+                    "Accept or Override this recommendation in the Reporting "
+                    "and Audit section at the bottom of this page."
+                )
 
     else:
         # Path B: no PGx result yet -- run the Pre-Test Triage Engine instead.
         with st.container(border=True):
             st.subheader("Pre-Test PGx Actionability Triage")
             st.caption(
-                "No genotype or phenotype data available. The Clinical Engine "
-                "(exact numeric labs) and DDI Engine combine with the Clinical "
-                "Risk Assessment's ADR risk flag above to answer one question "
-                "before any genetic test is ordered: is PGx testing for this "
-                "drug actually likely to change this patient's management?"
+                "No genotype or phenotype data available. The Layer 1 lab "
+                "flags and the DDI Engine combine with Layer 2's baseline "
+                "ADR risk verdict to answer one question before any genetic "
+                "test is ordered: is PGx testing for this drug actually "
+                "likely to change this patient's management?"
             )
-
-            col1, col2 = st.columns(2)
-            with col1:
-                egfr = _lab_value_with_unknown_checkbox(
-                    "eGFR (mL/min/1.73m²)", 0.0, 200.0, 90.0, 1.0, key="egfr"
-                )
-                alt_ast = _lab_value_with_unknown_checkbox(
-                    "ALT / AST (U/L)", 0.0, 1000.0, 25.0, 1.0, key="alt_ast"
-                )
-            with col2:
-                platelets = _lab_value_with_unknown_checkbox(
-                    "Platelets (x10³/µL)", 0.0, 800.0, 250.0, 5.0, key="platelets"
-                )
-                pt_inr = _lab_value_with_unknown_checkbox(
-                    "PT / INR (Ratio)", 0.5, 8.0, 1.0, 0.1, key="pt_inr"
-                )
 
             triage_clicked = st.button("Run Triage", type="primary")
 
             if triage_clicked:
-                st.session_state["triage_result"] = triage_pgx_actionability(
-                    drug, concurrent_medications,
-                    age=age, weight=weight, egfr=egfr, alt_ast=alt_ast,
-                    platelets=platelets, pt_inr=pt_inr,
-                    high_baseline_adr_risk=adr_result["high_baseline_adr_risk"],
-                )
-                st.session_state["triage_drug"] = drug
+                if not patient_id.strip():
+                    st.warning("Patient ID is required before running triage.")
+                else:
+                    triage_result = triage_pgx_actionability(
+                        drug, concurrent_medications,
+                        age=age, weight=weight,
+                        egfr_abnormal=egfr_abnormal, alt_ast_abnormal=alt_ast_abnormal,
+                        platelets_abnormal=platelets_abnormal, pt_inr_abnormal=pt_inr_abnormal,
+                        high_baseline_adr_risk=adr_result["high_baseline_adr_risk"],
+                    )
+                    st.session_state["triage_result"] = triage_result
+                    st.session_state["triage_drug"] = drug
+                    st.session_state["result"] = None
+                    st.session_state["eval_context"] = {
+                        "patient_id": patient_id.strip(),
+                        "drug": drug,
+                        "test_type": "Pre-Test Triage (Genotyping Not Available)",
+                        "test_result": "N/A",
+                        "recommendation_given": (
+                            f"Testing Priority: {triage_result['triage']}; "
+                            f"CPIC Recommendation: {triage_result['cpic_testing_recommendation']}"
+                        ),
+                        "guideline_url": None,
+                        "evidence_date": None,
+                        "rule_hash": None,
+                    }
+                    st.session_state["fhir_bundle"] = None
 
             triage_result = st.session_state.get("triage_result")
 
             if not triage_result:
-                st.info("Enter the available labs above, then click Run Triage.")
+                st.info("Click Run Triage above to resolve the Testing-Priority state machine.")
             else:
                 triage_drug = st.session_state.get("triage_drug", drug)
                 triage_state = triage_result["triage"]
@@ -728,6 +707,9 @@ with tab1:
                         "low", "LOW PRIORITY",
                         f"PGx testing for <b>{triage_drug_safe}</b> is unlikely to change management.",
                     )
+
+                st.markdown("**CPIC Pre-Test Testing Recommendation:**")
+                st.metric("Testing Recommendation", triage_result["cpic_testing_recommendation"])
 
                 st.markdown("**Rationale (PGx Actionability):**")
                 for line in triage_result["rationale"]:
@@ -755,10 +737,123 @@ with tab1:
                         )
 
                 if triage_result["clinical_findings"]:
-                    st.markdown("**Clinical Engine (Routine Labs) Findings:**")
+                    st.markdown("**Clinical Engine (Layer 1 Lab Flags) Findings:**")
                     st.json(triage_result["clinical_findings"])
 
-                _population_aware_pgx_context(triage_drug)
+                st.caption(
+                    "Accept or Override this recommendation in the Reporting "
+                    "and Audit section at the bottom of this page."
+                )
+
+        with st.container(border=True):
+            st.subheader("Population Context: GenomeIndia (Isolated, Decoupled Module)")
+            st.caption(
+                "This output is an independent variable: a function of "
+                "ethnicity alone. It is never integrated, multiplied, or "
+                "combined with Layer 1 or Layer 2 outputs, and it never "
+                "enters the Testing-Priority decision matrix above -- it "
+                "serves as an independent, population-based recommendation "
+                "only."
+            )
+            ethnicity = st.selectbox("Ethnicity", ETHNICITY_OPTIONS, key="ethnicity_select")
+            genomeindia_result = genomeindia_population_priority(ethnicity)
+            st.metric("GenomeIndia Population Priority", genomeindia_result["genomeindia_priority"])
+            st.session_state["genomeindia_result"] = genomeindia_result
+            st.warning(
+                "Population-level frequencies act as an isolated, "
+                "independent contextual signal; they cannot determine an "
+                "individual's genotype, do not replace clinical prescribing "
+                "guidelines, and do not alter the Testing-Priority state "
+                "above."
+            )
+
+    if genotyping_available == "Available":
+        st.session_state["genomeindia_result"] = None
+
+    st.header("Reporting and Audit")
+    with st.container(border=True):
+        st.caption(
+            "An integrated summary of Layer 1, Layer 2, and Layer 3 "
+            "outputs. Per the CRITICAL DECOUPLING constraint in Layer 3, "
+            "the GenomeIndia population-context output (when present) is "
+            "reported below without being merged into any other value."
+        )
+
+        st.markdown("**Layer 1 — Clinical Details (Laboratory Flags)**")
+        lab_flag_summary = {
+            "eGFR (Renal Function)": egfr_abnormal,
+            "ALT/AST (Hepatic Function)": alt_ast_abnormal,
+            "Platelets (Coagulation/CBC)": platelets_abnormal,
+            "PT/INR (Coagulation/CBC)": pt_inr_abnormal,
+        }
+        for label, flag in lab_flag_summary.items():
+            state = "ABNORMAL → FLAG" if flag is True else ("Normal" if flag is False else "Missing Data")
+            st.markdown(f"- {label}: **{state}**")
+
+        st.markdown("**Layer 2 — ADR Risk Prediction (Isolated Verdicts)**")
+        st.markdown(f"- ADR in acute vulnerable patient: **{adr_result['adatip_isolated_verdict']}**")
+        st.markdown(f"- ADR in chronic fragility: **{adr_result['gerontonet_isolated_verdict']}**")
+
+        st.markdown("**Layer 3 — Pharmacogenomics**")
+        report_result = st.session_state.get("result")
+        report_triage_result = st.session_state.get("triage_result")
+        report_genomeindia_result = st.session_state.get("genomeindia_result")
+
+        if genotyping_available == "Available" and report_result:
+            st.markdown(f"- CPIC Allele Pathway Outcome: **{report_result['risk']}**")
+            st.markdown(
+                f"- Recommendation & Dosage: "
+                f"{report_result.get('recommendation_and_dosage') or report_result.get('reason')}"
+            )
+        elif genotyping_available == "Not Available" and report_triage_result:
+            st.markdown(f"- Testing Priority: **{report_triage_result['triage']}**")
+            st.markdown(
+                f"- CPIC Pre-Test Recommendation: "
+                f"**{report_triage_result['cpic_testing_recommendation']}**"
+            )
+        else:
+            st.info("Complete Layer 3 above (Evaluate or Run Triage) to populate this report.")
+
+        if report_genomeindia_result:
+            st.markdown(
+                f"- GenomeIndia Population Priority (isolated, decoupled): "
+                f"**{report_genomeindia_result['genomeindia_priority']}** "
+                f"(ethnicity: {report_genomeindia_result['ethnicity']})"
+            )
+
+        st.markdown("---")
+        report_ready = bool(report_result or report_triage_result)
+        if not report_ready:
+            st.info("Run an evaluation or triage in Layer 3 above before recording a decision.")
+        else:
+            col_accept, col_override = st.columns(2)
+            with col_accept:
+                if st.button("Accept", key="report_accept"):
+                    _log_and_export("ACCEPTED")
+            with col_override:
+                if st.button("Override", key="report_override"):
+                    st.session_state["show_report_override"] = True
+
+            if st.session_state.get("show_report_override"):
+                justification = st.text_area(
+                    "Clinical Justification for Override", key="report_override_reason"
+                )
+                if st.button("Submit Override", key="report_submit_override"):
+                    if justification.strip():
+                        _log_and_export("OVERRIDDEN", justification.strip())
+                    else:
+                        st.info("Please provide a justification before submitting the override.")
+
+            fhir_bundle = st.session_state.get("fhir_bundle")
+            if fhir_bundle:
+                with st.expander("FHIR R4 / ABDM-aligned Interoperability Record"):
+                    st.json(fhir_bundle)
+                    st.download_button(
+                        "Download FHIR Bundle (JSON)",
+                        data=json.dumps(fhir_bundle, indent=2),
+                        file_name=f"fhir_bundle_{st.session_state['eval_context']['patient_id']}.json",
+                        mime="application/json",
+                    )
 
 _similar_cases_sidebar_panel()
 

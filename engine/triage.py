@@ -1,14 +1,14 @@
 """Pharmacogenomic (PGx) Testing-Priority Triage for the PRISM-AIIMS
-pre-test decision pipeline.
+pre-test decision pipeline (Layer 3: Pharmacogenomics, Path B).
 
-Combines Tier 1 (engine.clinical: lab-abnormality assessment) and Tier 2
-(engine.ddi: drug-drug interaction lookup) outputs into a single pre-test
-recommendation: is a pharmacogenomic test for this drug actually likely to
-change management, *before* any genetic result exists? This is deliberately
-independent of engine.rules, which handles the downstream genotype/
-phenotype -> dosing decision *after* a PGx test result already exists --
-this module answers "should we test at all," engine.rules answers "given
-the test result, what do we do."
+Combines Layer 1 (engine.clinical: lab-abnormality state assessment) and
+the DDI engine (engine.ddi: drug-drug interaction lookup) outputs into a
+single pre-test recommendation: is a pharmacogenomic test for this drug
+actually likely to change management, *before* any genetic result exists?
+This is deliberately independent of engine.rules, which handles the
+downstream genotype/phenotype -> dosing decision *after* a PGx test result
+already exists (Layer 3, Path A) -- this module answers "should we test at
+all," engine.rules answers "given the test result, what do we do."
 
 CONCEPTUAL MODEL
 
@@ -35,15 +35,20 @@ and related guidance), independent of any single patient:
 
 `Patient-Specific Clinical Context` is a boolean state describing whether a
 condition specific to *this drug's own* metabolic or pharmacodynamic
-pathway is present for *this* patient:
+pathway is present for *this* patient. Every lab input into this state is
+itself a three-valued flag -- True (abnormal), False (normal), or None
+(missing data) -- produced upstream by engine.clinical's Layer 1 state
+functions; this module never receives or evaluates a raw numeric lab
+reading.
 
-    CONTEXT_NEUTRAL              -- no pathway-specific condition detected.
+    CONTEXT_NEUTRAL              -- no pathway-specific abnormal state is
+                                     flagged.
     CONTEXT_PATHWAY_INTERSECTING -- a severe drug-drug interaction, or an
-                                     extreme lab value, directly implicating
-                                     this drug's own pathway is present
-                                     (e.g. a severe CYP-mediated interaction,
-                                     or an extreme INR/coagulation
-                                     abnormality for Warfarin).
+                                     abnormal-flagged lab state, directly
+                                     implicating this drug's own pathway is
+                                     present (e.g. a severe CYP-mediated
+                                     interaction, or an abnormal-flagged
+                                     coagulation state for Warfarin).
 
 The two inputs are resolved against a fixed decision matrix
 (`_PRIORITY_STATE_MATRIX`) to a single output state -- this is an explicit
@@ -56,22 +61,33 @@ raises the prior probability of an adverse event *in general*, but it is
 statistically independent of whether *this drug's* specific pathway is
 implicated for *this* patient. Consequently it can never place Clinical
 Context into CONTEXT_PATHWAY_INTERSECTING, and it never transitions the
-priority state on its own -- this is the corrected behavior following
-review of the previous (linear-escalation) model, which had incorrectly
-let a general vulnerability signal independently force a state transition.
-The covariate is still surfaced, structurally separate from `triage`/
-`rationale`, as `contextual_modifier` -- see `_contextual_modifier_output`.
+priority state on its own. The covariate is still surfaced, structurally
+separate from `triage`/`rationale`, as `contextual_modifier` -- see
+`_contextual_modifier_output`.
 
-Output triage states:
+Output triage states, and their downstream projection onto CPIC's own
+pre-test testing vocabulary (see `resolve_cpic_testing_recommendation`):
     HIGH PRIORITY   -- a validated actionable relationship exists AND
                        patient/drug context makes genotype information
-                       particularly relevant right now.
+                       particularly relevant right now.        -> Required
     CONSIDER        -- actionable PGx information may be useful, but
                        clinical context does not establish a strong need
-                       for immediate testing.
+                       for immediate testing.                  -> Recommended
     LOW PRIORITY    -- no sufficiently actionable PGx relationship is
                        identified for the current decision, or genotype is
-                       unlikely to alter management.
+                       unlikely to alter management.            -> Not Indicated
+
+DECOUPLED MODULE: mock GenomeIndia population context
+
+`genomeindia_population_priority`, below, is a second, entirely separate
+isolated execution context: an ethnicity-keyed lookup returning a mock
+population-level allele-frequency priority (High/Medium/Low). Its output is
+a pure function of ethnicity alone -- an independent variable in the
+strict probabilistic sense. It is never read by `_resolve_priority_state`,
+never combined or multiplied with any Layer 1 or Layer 2 output, and never
+appears inside the `triage_pgx_actionability` return value; a caller (the
+UI layer) invokes it separately and renders it as a structurally isolated
+result.
 """
 
 from engine.clinical import (
@@ -107,6 +123,84 @@ _PRIORITY_STATE_MATRIX = {
     (ACTIONABILITY_VALIDATED_LOW, CONTEXT_NEUTRAL): TRIAGE_CONSIDER,
     (ACTIONABILITY_VALIDATED_LOW, CONTEXT_PATHWAY_INTERSECTING): TRIAGE_HIGH,
 }
+
+# --- CPIC pre-test testing recommendation (Layer 3, Path B, first output) --
+# A deterministic projection of the already-resolved Testing Priority state
+# onto CPIC's own two-valued pre-test vocabulary (Required / Recommended),
+# extended with a third state, Not Indicated, for LOW PRIORITY -- a case
+# CPIC guidance itself does not separately name. This carries no
+# information the state machine above did not already produce; it is a
+# relabeling, not a second independent computation.
+CPIC_TESTING_REQUIRED = "Required"
+CPIC_TESTING_RECOMMENDED = "Recommended"
+CPIC_TESTING_NOT_INDICATED = "Not Indicated"
+
+_CPIC_TESTING_STATE_MAP = {
+    TRIAGE_HIGH: CPIC_TESTING_REQUIRED,
+    TRIAGE_CONSIDER: CPIC_TESTING_RECOMMENDED,
+    TRIAGE_LOW: CPIC_TESTING_NOT_INDICATED,
+}
+
+# --- Mock GenomeIndia population context (Layer 3, Path B, second output) --
+# Illustrative placeholder priorities only -- NOT derived from an actual
+# GenomeIndia data release. Keyed by ethnicity rather than by drug: each
+# entry models, for demonstration purposes only, a broad pre-test priority
+# category a population-level allele-frequency prior might suggest for a
+# given population group, independent of any specific drug.
+GENOMEINDIA_PRIORITY_HIGH = "High Priority"
+GENOMEINDIA_PRIORITY_MEDIUM = "Medium Priority"
+GENOMEINDIA_PRIORITY_LOW = "Low Priority"
+
+ETHNICITY_OPTIONS = [
+    "North Indian (Indo-Aryan)",
+    "South Indian (Dravidian)",
+    "East Indian",
+    "North East Indian",
+    "West Indian",
+    "Other / Unspecified",
+]
+
+GENOMEINDIA_ETHNICITY_PRIORS = {
+    "North Indian (Indo-Aryan)": GENOMEINDIA_PRIORITY_HIGH,
+    "South Indian (Dravidian)": GENOMEINDIA_PRIORITY_MEDIUM,
+    "East Indian": GENOMEINDIA_PRIORITY_MEDIUM,
+    "North East Indian": GENOMEINDIA_PRIORITY_LOW,
+    "West Indian": GENOMEINDIA_PRIORITY_MEDIUM,
+    "Other / Unspecified": GENOMEINDIA_PRIORITY_LOW,
+}
+
+
+def resolve_cpic_testing_recommendation(triage_state: str) -> str:
+    """Project a Testing Priority state onto CPIC's Required/Recommended/
+    Not Indicated vocabulary. See the module docstring's state-mapping
+    table. An unrecognized state defaults to Not Indicated rather than
+    fabricating a stronger recommendation than the state machine resolved.
+    """
+    return _CPIC_TESTING_STATE_MAP.get(triage_state, CPIC_TESTING_NOT_INDICATED)
+
+
+def genomeindia_population_priority(ethnicity: str) -> dict:
+    """A mock, ethnicity-keyed GenomeIndia population allele-frequency
+    lookup -- an isolated execution context whose return value is a
+    function of `ethnicity` alone.
+
+    CRITICAL DECOUPLING: this output must never be integrated, multiplied,
+    or combined with Layer 1 (lab-abnormality flags) or Layer 2 (baseline
+    ADR risk) outputs, and must never be passed into
+    `_resolve_priority_state` or read by `triage_pgx_actionability`. It
+    serves as an independent, population-based recommendation only; no
+    function in this module consumes its return value.
+
+    Returns {"ethnicity", "genomeindia_priority", "source"}. Every priority
+    value is illustrative only -- not sourced from an actual GenomeIndia
+    data release, and never a substitute for an individual genotype result.
+    """
+    priority = GENOMEINDIA_ETHNICITY_PRIORS.get(ethnicity, GENOMEINDIA_PRIORITY_LOW)
+    return {
+        "ethnicity": ethnicity,
+        "genomeindia_priority": priority,
+        "source": "GenomeIndia (Prototype, illustrative only)",
+    }
 
 
 def _resolve_priority_state(actionability: str, context: str) -> str:
@@ -184,10 +278,10 @@ def _clopidogrel_triage(concurrent_medications, high_baseline_adr_risk=False):
     }
 
 
-def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None, high_baseline_adr_risk=False):
+def _tacrolimus_triage(concurrent_medications, egfr_abnormal=None, alt_ast_abnormal=None, high_baseline_adr_risk=False):
     ddi_findings = check_drug_interactions("tacrolimus", concurrent_medications)
-    renal = assess_renal_function(egfr)
-    hepatic = assess_hepatic_function(alt_ast)
+    renal = assess_renal_function(egfr_abnormal)
+    hepatic = assess_hepatic_function(alt_ast_abnormal)
 
     actionability = ACTIONABILITY_VALIDATED_HIGH
     pathway_intersecting = bool(ddi_findings) or renal["renal_function_status"] == "REDUCED" or hepatic["transaminase_status"] == "ELEVATED"
@@ -202,19 +296,15 @@ def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None, high_bas
     warnings = []
     if renal["renal_function_status"] == "REDUCED":
         warnings.append(
-            f"eGFR {renal['egfr']} (< {EGFR_THRESHOLD}): reduced eGFR requires "
-            "clinical correlation for renal dose adjustment per KDIGO 2024 -- "
-            "a pathway-intersecting condition; lab-driven therapeutic drug "
-            "monitoring (TDM) is mandatory regardless of genotype."
+            renal["detail"] + " This is a pathway-intersecting condition; "
+            "lab-driven therapeutic drug monitoring (TDM) is mandatory "
+            "regardless of genotype."
         )
     if hepatic["transaminase_status"] == "ELEVATED":
         warnings.append(
-            f"ALT/AST {hepatic['alt_ast']} U/L (> {ALT_AST_THRESHOLD}): "
-            "elevated transaminases are a laboratory abnormality requiring "
-            "clinical correlation per NFI, not an automatic hepatic-"
-            "impairment diagnosis -- a pathway-intersecting condition; "
+            hepatic["detail"] + " This is a pathway-intersecting condition; "
             "lab-driven TDM and empirical dose caution are mandatory "
-            "pending that correlation."
+            "pending clinical correlation."
         )
     if ddi_findings:
         warnings.append(
@@ -233,9 +323,9 @@ def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None, high_bas
     }
 
 
-def _warfarin_triage(concurrent_medications, platelets=None, pt_inr=None, high_baseline_adr_risk=False):
+def _warfarin_triage(concurrent_medications, platelets_abnormal=None, pt_inr_abnormal=None, high_baseline_adr_risk=False):
     ddi_findings = check_drug_interactions("warfarin", concurrent_medications)
-    coagulation = assess_bleeding_risk_labs(platelets, pt_inr)
+    coagulation = assess_bleeding_risk_labs(platelets_abnormal, pt_inr_abnormal)
 
     severe_ddi = any(finding["severity"] == "MAJOR" for finding in ddi_findings)
     abnormal_coagulation = coagulation["coagulation_cbc_status"] == "ABNORMAL"
@@ -293,40 +383,49 @@ def triage_pgx_actionability(
     *,
     age: float = None,
     weight: float = None,
-    egfr: float = None,
-    alt_ast: float = None,
-    platelets: float = None,
-    pt_inr: float = None,
+    egfr_abnormal: bool = None,
+    alt_ast_abnormal: bool = None,
+    platelets_abnormal: bool = None,
+    pt_inr_abnormal: bool = None,
     high_baseline_adr_risk: bool = False,
 ) -> dict:
     """Pre-test triage: should a PGx test even be ordered for this drug?
 
     Implements Testing Priority = f(PGx Actionability, Patient-Specific
     Clinical Context) -- see the module docstring for the full decision-
-    matrix definition. All clinical-context parameters are objective, exact
-    numeric routine inputs: `egfr` (mL/min/1.73m^2), `alt_ast` (U/L),
-    `platelets` (x10^3/uL), `pt_inr` (ratio), `age` (years), `weight` (kg).
-    Any of these may be `None` when a clinician marks a test "Not Done /
-    Unknown" -- that never raises a flag. `high_baseline_adr_risk` is the
-    single boolean verdict already computed by the Clinical Risk
-    Assessment's engine.clinical.calculate_adr_risk() -- this function
-    never receives or reasons about the raw subjective predictor checkboxes
-    (previous ADR history, heart failure, etc.) behind it, and per the
-    corrected model, that covariate never transitions the priority state on
-    its own for any drug (see `_contextual_modifier_output`).
+    matrix definition. Every clinical-context lab parameter is a strict
+    three-valued flag produced upstream by engine.clinical's Layer 1 state
+    functions: `egfr_abnormal`, `alt_ast_abnormal`, `platelets_abnormal`,
+    `pt_inr_abnormal` are each `True` (abnormal), `False` (normal), or
+    `None` (missing data) -- never a raw numeric reading. `age` (years) and
+    `weight` (kg) remain objective numeric inputs used only for the
+    pediatric/low-weight dosing context, unrelated to the lab-abnormality
+    state machine. `high_baseline_adr_risk` is the single boolean verdict
+    already computed by Layer 2's engine.clinical.calculate_adr_risk() --
+    this function never receives or reasons about the raw subjective
+    predictor checkboxes behind it, and that covariate never transitions
+    the priority state on its own for any drug (see
+    `_contextual_modifier_output`).
 
     Returns {"triage", "rationale", "warnings", "ddi_findings",
-    "clinical_findings", "contextual_modifier"}. `warnings` (distinct from
-    `rationale`) carries strong, context-driven safety flags -- e.g.
-    Tacrolimus's mandatory-TDM warning on a reduced eGFR / elevated
-    transaminases, or Warfarin's elevated-baseline-ADR-risk warning that
-    does not itself change the priority state. `contextual_modifier` is
-    kept structurally separate from `triage`/`rationale`: it reports the
-    patient's baseline ADR risk status without conflating general
-    vulnerability with this drug's own PGx actionability state. A drug
-    outside this triage's MVP scope (Clopidogrel, Tacrolimus, Warfarin)
-    resolves to ACTIONABILITY_NOT_MODELED and returns LOW PRIORITY with an
-    explanatory rationale, rather than a fabricated assessment.
+    "clinical_findings", "contextual_modifier", "cpic_testing_recommendation"}.
+    `warnings` (distinct from `rationale`) carries strong, context-driven
+    safety flags -- e.g. Tacrolimus's mandatory-TDM warning on an
+    abnormal-flagged renal/hepatic state, or Warfarin's elevated-baseline-
+    ADR-risk warning that does not itself change the priority state.
+    `contextual_modifier` is kept structurally separate from
+    `triage`/`rationale`: it reports the patient's baseline ADR risk status
+    without conflating general vulnerability with this drug's own PGx
+    actionability state. `cpic_testing_recommendation` is the deterministic
+    Required/Recommended/Not Indicated projection of `triage` (see
+    `resolve_cpic_testing_recommendation`). A drug outside this triage's
+    MVP scope (Clopidogrel, Tacrolimus, Warfarin) resolves to
+    ACTIONABILITY_NOT_MODELED and returns LOW PRIORITY with an explanatory
+    rationale, rather than a fabricated assessment. The mock GenomeIndia
+    population-context lookup (`genomeindia_population_priority`) is
+    deliberately absent from this return value -- it is an isolated
+    execution context the caller invokes separately; see the module
+    docstring's CRITICAL DECOUPLING note.
     """
     drug_key = (drug or "").strip().lower()
     age_weight = assess_age_weight_context(age, weight)
@@ -335,12 +434,12 @@ def triage_pgx_actionability(
         result = _clopidogrel_triage(concurrent_medications, high_baseline_adr_risk=high_baseline_adr_risk)
     elif drug_key == "tacrolimus":
         result = _tacrolimus_triage(
-            concurrent_medications, egfr=egfr, alt_ast=alt_ast,
+            concurrent_medications, egfr_abnormal=egfr_abnormal, alt_ast_abnormal=alt_ast_abnormal,
             high_baseline_adr_risk=high_baseline_adr_risk,
         )
     elif drug_key == "warfarin":
         result = _warfarin_triage(
-            concurrent_medications, platelets=platelets, pt_inr=pt_inr,
+            concurrent_medications, platelets_abnormal=platelets_abnormal, pt_inr_abnormal=pt_inr_abnormal,
             high_baseline_adr_risk=high_baseline_adr_risk,
         )
     else:
@@ -357,4 +456,5 @@ def triage_pgx_actionability(
     if age_weight["flags"]:
         result["rationale"] = result["rationale"] + age_weight["flags"]
     result["clinical_findings"] = result["clinical_findings"] + [age_weight]
+    result["cpic_testing_recommendation"] = resolve_cpic_testing_recommendation(result["triage"])
     return result

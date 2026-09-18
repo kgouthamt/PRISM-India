@@ -1,4 +1,5 @@
-"""Unit tests for engine.clinical (objective clinical data assessment)."""
+"""Unit tests for engine.clinical (Layer 1 lab-abnormality state machine and
+Layer 2 isolated ADR risk execution contexts)."""
 
 import unittest
 
@@ -10,6 +11,8 @@ from engine.clinical import (
     GERONTONET_HIGH_RISK_THRESHOLD,
     GERONTONET_RISK_HIGH,
     GERONTONET_RISK_LOW,
+    ISOLATED_VERDICT_BASELINE,
+    ISOLATED_VERDICT_HIGH,
     PLATELETS_THRESHOLD,
     PT_INR_THRESHOLD,
     assess_age_weight_context,
@@ -22,21 +25,18 @@ from engine.clinical import (
 
 
 class TestRenalFunction(unittest.TestCase):
-    """eGFR is a lab abnormality flag, not a nephrotoxicity diagnosis."""
+    """Renal function is a strict three-valued state -- True (abnormal),
+    False (normal), or None (missing data) -- never a numeric comparison."""
 
-    def test_egfr_at_threshold_is_normal(self):
-        result = assess_renal_function(EGFR_THRESHOLD)
-        self.assertEqual(result["renal_function_status"], "NORMAL")
-
-    def test_egfr_just_below_threshold_is_reduced(self):
-        result = assess_renal_function(EGFR_THRESHOLD - 0.1)
+    def test_true_flag_is_reduced(self):
+        result = assess_renal_function(True)
         self.assertEqual(result["renal_function_status"], "REDUCED")
 
-    def test_egfr_well_above_threshold_is_normal(self):
-        result = assess_renal_function(90)
+    def test_false_flag_is_normal(self):
+        result = assess_renal_function(False)
         self.assertEqual(result["renal_function_status"], "NORMAL")
 
-    def test_egfr_none_is_unknown_and_never_flags(self):
+    def test_none_flag_is_unknown_and_never_flags(self):
         result = assess_renal_function(None)
         self.assertEqual(result["renal_function_status"], "UNKNOWN")
 
@@ -44,48 +44,68 @@ class TestRenalFunction(unittest.TestCase):
         result = assess_renal_function()
         self.assertEqual(result["renal_function_status"], "UNKNOWN")
 
+    def test_true_immediately_transitions_to_abnormal_state(self):
+        # Marking a lab True must produce the ABNORMAL -> FLAG transition
+        # with no intermediate step.
+        result = assess_renal_function(True)
+        self.assertNotEqual(result["renal_function_status"], "NORMAL")
+        self.assertNotEqual(result["renal_function_status"], "UNKNOWN")
+
     def test_reduced_detail_uses_the_required_wording(self):
-        result = assess_renal_function(EGFR_THRESHOLD - 0.1)
-        self.assertIn("Reduced eGFR; requires clinical correlation for renal dose adjustment", result["detail"])
+        result = assess_renal_function(True)
+        self.assertIn("Reduced eGFR flagged as abnormal; requires clinical correlation", result["detail"])
         self.assertNotIn("nephrotoxicity risk", result["detail"].lower())
 
+    def test_reduced_detail_cites_kdigo_reference_threshold(self):
+        result = assess_renal_function(True)
+        self.assertIn("KDIGO 2024", result["detail"])
+        self.assertIn(str(EGFR_THRESHOLD), result["detail"])
+
     def test_source_is_kdigo_2024(self):
-        self.assertEqual(assess_renal_function(90)["source"], "KDIGO 2024")
+        self.assertEqual(assess_renal_function(False)["source"], "KDIGO 2024")
+
+    def test_egfr_abnormal_field_echoes_input(self):
+        self.assertTrue(assess_renal_function(True)["egfr_abnormal"])
+        self.assertFalse(assess_renal_function(False)["egfr_abnormal"])
+        self.assertIsNone(assess_renal_function(None)["egfr_abnormal"])
 
 
 class TestHepaticFunction(unittest.TestCase):
-    """ALT/AST is a lab abnormality flag, not a hepatic-impairment diagnosis."""
+    """Hepatic transaminase state is a strict three-valued flag, never a
+    numeric comparison."""
 
-    def test_alt_ast_at_threshold_is_normal(self):
-        result = assess_hepatic_function(ALT_AST_THRESHOLD)
+    def test_true_flag_is_elevated(self):
+        result = assess_hepatic_function(True)
+        self.assertEqual(result["transaminase_status"], "ELEVATED")
+
+    def test_false_flag_is_normal(self):
+        result = assess_hepatic_function(False)
         self.assertEqual(result["transaminase_status"], "NORMAL")
 
-    def test_alt_ast_just_above_threshold_is_elevated(self):
-        result = assess_hepatic_function(ALT_AST_THRESHOLD + 0.1)
-        self.assertEqual(result["transaminase_status"], "ELEVATED")
-
-    def test_alt_ast_well_above_threshold_is_elevated(self):
-        result = assess_hepatic_function(150)
-        self.assertEqual(result["transaminase_status"], "ELEVATED")
-
-    def test_alt_ast_none_is_unknown_and_never_flags(self):
+    def test_none_flag_is_unknown_and_never_flags(self):
         result = assess_hepatic_function(None)
         self.assertEqual(result["transaminase_status"], "UNKNOWN")
 
     def test_elevated_detail_uses_the_required_wording(self):
-        result = assess_hepatic_function(ALT_AST_THRESHOLD + 0.1)
-        self.assertIn("Elevated transaminases; laboratory abnormality", result["detail"])
+        result = assess_hepatic_function(True)
+        self.assertIn("Elevated transaminases flagged as abnormal; laboratory abnormality", result["detail"])
         self.assertNotIn("hepatic impairment", result["detail"].lower())
 
+    def test_elevated_detail_cites_nfi_reference_threshold(self):
+        result = assess_hepatic_function(True)
+        self.assertIn("NFI", result["detail"])
+        self.assertIn(str(ALT_AST_THRESHOLD), result["detail"])
+
     def test_source_is_cdsco_nfi(self):
-        self.assertIn("CDSCO", assess_hepatic_function(25)["source"])
+        self.assertIn("CDSCO", assess_hepatic_function(False)["source"])
 
 
 class TestBleedingRiskLabs(unittest.TestCase):
-    """Platelets/PT-INR are lab abnormality flags, not a bleeding-risk diagnosis."""
+    """Coagulation/CBC state is resolved from two independent three-valued
+    flags, never a numeric comparison."""
 
-    def test_normal_values_are_normal(self):
-        result = assess_bleeding_risk_labs(250, 1.0)
+    def test_both_false_is_normal(self):
+        result = assess_bleeding_risk_labs(False, False)
         self.assertEqual(result["coagulation_cbc_status"], "NORMAL")
         self.assertEqual(result["flags"], [])
 
@@ -94,32 +114,30 @@ class TestBleedingRiskLabs(unittest.TestCase):
         self.assertEqual(result["coagulation_cbc_status"], "UNKNOWN")
         self.assertEqual(result["flags"], [])
 
-    def test_platelets_at_threshold_is_normal(self):
-        result = assess_bleeding_risk_labs(PLATELETS_THRESHOLD, 1.0)
-        self.assertEqual(result["coagulation_cbc_status"], "NORMAL")
-
-    def test_platelets_below_threshold_is_abnormal(self):
-        result = assess_bleeding_risk_labs(PLATELETS_THRESHOLD - 1, 1.0)
+    def test_platelets_true_is_abnormal(self):
+        result = assess_bleeding_risk_labs(True, False)
         self.assertEqual(result["coagulation_cbc_status"], "ABNORMAL")
 
-    def test_pt_inr_at_threshold_is_normal(self):
-        result = assess_bleeding_risk_labs(250, PT_INR_THRESHOLD)
-        self.assertEqual(result["coagulation_cbc_status"], "NORMAL")
-
-    def test_pt_inr_above_threshold_is_abnormal(self):
-        result = assess_bleeding_risk_labs(250, PT_INR_THRESHOLD + 0.1)
+    def test_pt_inr_true_is_abnormal(self):
+        result = assess_bleeding_risk_labs(False, True)
         self.assertEqual(result["coagulation_cbc_status"], "ABNORMAL")
 
-    def test_one_value_known_normal_other_unknown_is_normal(self):
-        result = assess_bleeding_risk_labs(250, None)
+    def test_one_flag_false_other_none_is_normal(self):
+        result = assess_bleeding_risk_labs(False, None)
         self.assertEqual(result["coagulation_cbc_status"], "NORMAL")
-        result2 = assess_bleeding_risk_labs(None, 1.0)
+        result2 = assess_bleeding_risk_labs(None, False)
         self.assertEqual(result2["coagulation_cbc_status"], "NORMAL")
 
     def test_abnormal_detail_uses_the_required_wording(self):
-        result = assess_bleeding_risk_labs(PLATELETS_THRESHOLD - 1, 1.0)
+        result = assess_bleeding_risk_labs(True, False)
         self.assertIn("Abnormal coagulation/CBC parameters", result["detail"])
         self.assertNotIn("bleeding risk", result["detail"].lower())
+
+    def test_abnormal_flags_cite_reference_thresholds(self):
+        result = assess_bleeding_risk_labs(True, True)
+        combined = " ".join(result["flags"])
+        self.assertIn(str(PLATELETS_THRESHOLD), combined)
+        self.assertIn(str(PT_INR_THRESHOLD), combined)
 
 
 class TestAgeWeightContext(unittest.TestCase):
@@ -238,7 +256,7 @@ class TestGerontoNetScoreMath(unittest.TestCase):
         self.assertIn("GerontoNet", calculate_gerontonet_score()["source"])
 
 
-class TestCalculateAdrRisk(unittest.TestCase):
+class TestCalculateAdrRiskComposite(unittest.TestCase):
     """Baseline ADR risk from the ADATIP 9-Predictor Model, the actual
     GerontoNet ADR Risk Score, and clinician-reported general clinical
     history."""
@@ -311,6 +329,57 @@ class TestCalculateAdrRisk(unittest.TestCase):
         # raise a TypeError or KeyError.
         result = calculate_adr_risk()
         self.assertIn("high_baseline_adr_risk", result)
+
+
+class TestIsolatedExecutionContexts(unittest.TestCase):
+    """ADATIP and GerontoNet are isolated execution contexts: each produces
+    its own independent verdict, and neither model's verdict is derived
+    from, or influenced by, the other's internal state."""
+
+    def test_both_verdicts_default_to_baseline_standard(self):
+        result = calculate_adr_risk()
+        self.assertEqual(result["adatip_isolated_verdict"], ISOLATED_VERDICT_BASELINE)
+        self.assertEqual(result["gerontonet_isolated_verdict"], ISOLATED_VERDICT_BASELINE)
+
+    def test_adatip_verdict_is_high_risk_independent_of_gerontonet(self):
+        # Two ADATIP predictors trip the ADATIP verdict alone, with every
+        # GerontoNet-only predictor left at its default (False/0).
+        result = calculate_adr_risk(chronic_lung_disease=True, diuretics=True)
+        self.assertEqual(result["adatip_isolated_verdict"], ISOLATED_VERDICT_HIGH)
+        self.assertEqual(result["gerontonet_isolated_verdict"], ISOLATED_VERDICT_BASELINE)
+
+    def test_gerontonet_verdict_is_high_risk_independent_of_adatip(self):
+        # A GerontoNet score of 4 trips the GerontoNet verdict alone, with
+        # every ADATIP-only predictor left at its default (False/None).
+        result = calculate_adr_risk(
+            heart_failure=True, liver_disease=True, renal_failure=True,
+            gte4_comorbid_conditions=True,
+        )
+        self.assertEqual(result["gerontonet_isolated_verdict"], ISOLATED_VERDICT_HIGH)
+        self.assertEqual(result["adatip_isolated_verdict"], ISOLATED_VERDICT_BASELINE)
+
+    def test_both_verdicts_can_independently_be_high_risk_simultaneously(self):
+        result = calculate_adr_risk(
+            chronic_lung_disease=True, diuretics=True,
+            heart_failure=True, liver_disease=True, renal_failure=True,
+            gte4_comorbid_conditions=True,
+        )
+        self.assertEqual(result["adatip_isolated_verdict"], ISOLATED_VERDICT_HIGH)
+        self.assertEqual(result["gerontonet_isolated_verdict"], ISOLATED_VERDICT_HIGH)
+
+    def test_general_history_never_moves_either_isolated_verdict(self):
+        # Allergy + family history drives the composite high_baseline_adr_risk
+        # True, but must never move either model's own isolated verdict --
+        # that group is not part of either model.
+        result = calculate_adr_risk(allergy_history=True, family_history=True)
+        self.assertTrue(result["high_baseline_adr_risk"])
+        self.assertEqual(result["adatip_isolated_verdict"], ISOLATED_VERDICT_BASELINE)
+        self.assertEqual(result["gerontonet_isolated_verdict"], ISOLATED_VERDICT_BASELINE)
+
+    def test_isolated_verdicts_use_the_exact_ui_vocabulary(self):
+        result = calculate_adr_risk()
+        self.assertIn(result["adatip_isolated_verdict"], ("High Risk", "Baseline Standard"))
+        self.assertIn(result["gerontonet_isolated_verdict"], ("High Risk", "Baseline Standard"))
 
 
 if __name__ == "__main__":

@@ -1,22 +1,35 @@
-"""Unit tests for engine.triage (PGx Testing-Priority Triage).
+"""Unit tests for engine.triage (Layer 3, Path B: PGx Testing-Priority
+Triage).
 
-Covers only objective, routine inputs (drug, exact numeric labs, DDIs,
-age/weight) -- there is deliberately no test exercising a "previous ADR" or
-"previous treatment failure" parameter, since triage_pgx_actionability has
-no such parameter to begin with (only the pre-computed high_baseline_adr_risk
-boolean crosses in from engine.clinical.calculate_adr_risk).
+Covers only objective inputs (drug, three-valued lab-abnormality flags,
+DDIs, age/weight) -- there is deliberately no test exercising a "previous
+ADR" or "previous treatment failure" parameter, since triage_pgx_actionability
+has no such parameter to begin with (only the pre-computed
+high_baseline_adr_risk boolean crosses in from
+engine.clinical.calculate_adr_risk).
 
 Also asserts, per the integrated decision-matrix architecture:
-    - the lab-abnormality threshold logic (renal_function_status /
+    - the lab-abnormality state machine (renal_function_status /
       transaminase_status / coagulation_cbc_status, surfaced via
-      clinical_findings) never claims a diagnosis, only a lab abnormality;
+      clinical_findings) never claims a diagnosis, only a lab abnormality,
+      and is driven entirely by True/False/None flags, never a numeric
+      reading;
     - Testing Priority = f(PGx Actionability, Patient-Specific Clinical
-      Context) resolves deterministically via the decision matrix; and
+      Context) resolves deterministically via the decision matrix;
     - baseline ADR risk (Layer 2) is an orthogonal covariate that is
       reported separately (`contextual_modifier`) and never independently
       transitions the priority state for any drug -- only a
-      pathway-intersecting clinical context (a severe DDI, or an extreme
-      lab value tied to the drug's own mechanism) can do that.
+      pathway-intersecting clinical context (a severe DDI, or an
+      abnormal-flagged lab state tied to the drug's own mechanism) can do
+      that;
+    - the CPIC Required/Recommended/Not Indicated projection
+      (`resolve_cpic_testing_recommendation` /
+      `cpic_testing_recommendation`) is a deterministic function of the
+      resolved triage state alone; and
+    - the mock GenomeIndia ethnicity lookup (`genomeindia_population_priority`)
+      is fully decoupled: it is absent from every triage_pgx_actionability
+      return value and never influences the resolved triage state for any
+      ethnicity.
 """
 
 import unittest
@@ -27,7 +40,18 @@ from engine.clinical import (
     calculate_adr_risk,
     calculate_gerontonet_score,
 )
-from engine.triage import TRIAGE_CONSIDER, TRIAGE_HIGH, TRIAGE_LOW, triage_pgx_actionability
+from engine.triage import (
+    CPIC_TESTING_NOT_INDICATED,
+    CPIC_TESTING_RECOMMENDED,
+    CPIC_TESTING_REQUIRED,
+    ETHNICITY_OPTIONS,
+    TRIAGE_CONSIDER,
+    TRIAGE_HIGH,
+    TRIAGE_LOW,
+    genomeindia_population_priority,
+    resolve_cpic_testing_recommendation,
+    triage_pgx_actionability,
+)
 
 
 class TestClopidogrelTriage(unittest.TestCase):
@@ -48,59 +72,59 @@ class TestTacrolimusTriage(unittest.TestCase):
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
     def test_normal_labs_produce_no_warnings(self):
-        result = triage_pgx_actionability("Tacrolimus", egfr=90, alt_ast=25)
+        result = triage_pgx_actionability("Tacrolimus", egfr_abnormal=False, alt_ast_abnormal=False)
         self.assertEqual(result["warnings"], [])
 
-    def test_unknown_labs_produce_no_warnings_and_no_crash(self):
-        result = triage_pgx_actionability("Tacrolimus", egfr=None, alt_ast=None)
+    def test_missing_labs_produce_no_warnings_and_no_crash(self):
+        result = triage_pgx_actionability("Tacrolimus", egfr_abnormal=None, alt_ast_abnormal=None)
         self.assertEqual(result["warnings"], [])
 
-    def test_low_egfr_triggers_mandatory_tdm_warning(self):
-        result = triage_pgx_actionability("Tacrolimus", egfr=35)
+    def test_abnormal_egfr_triggers_mandatory_tdm_warning(self):
+        result = triage_pgx_actionability("Tacrolimus", egfr_abnormal=True)
         self.assertTrue(any("mandatory" in w.lower() for w in result["warnings"]))
         self.assertTrue(any("KDIGO" in w for w in result["warnings"]))
 
-    def test_low_egfr_never_asserts_a_nephrotoxicity_diagnosis(self):
-        result = triage_pgx_actionability("Tacrolimus", egfr=35)
+    def test_abnormal_egfr_never_asserts_a_nephrotoxicity_diagnosis(self):
+        result = triage_pgx_actionability("Tacrolimus", egfr_abnormal=True)
         self.assertFalse(any("nephrotoxicity risk" in w.lower() for w in result["warnings"]))
         renal_finding = result["clinical_findings"][0]
         self.assertEqual(renal_finding["renal_function_status"], "REDUCED")
 
-    def test_high_alt_ast_triggers_mandatory_tdm_warning(self):
-        result = triage_pgx_actionability("Tacrolimus", alt_ast=150)
+    def test_abnormal_alt_ast_triggers_mandatory_tdm_warning(self):
+        result = triage_pgx_actionability("Tacrolimus", alt_ast_abnormal=True)
         self.assertTrue(any("mandatory" in w.lower() for w in result["warnings"]))
         self.assertTrue(any("NFI" in w for w in result["warnings"]))
 
-    def test_high_alt_ast_never_asserts_a_hepatic_impairment_diagnosis(self):
-        result = triage_pgx_actionability("Tacrolimus", alt_ast=150)
+    def test_abnormal_alt_ast_never_asserts_a_hepatic_impairment_diagnosis(self):
+        result = triage_pgx_actionability("Tacrolimus", alt_ast_abnormal=True)
         self.assertFalse(any("hepatic impairment" in w.lower() for w in result["warnings"]))
         hepatic_finding = result["clinical_findings"][1]
         self.assertEqual(hepatic_finding["transaminase_status"], "ELEVATED")
 
     def test_both_abnormal_produce_two_warnings(self):
-        result = triage_pgx_actionability("Tacrolimus", egfr=35, alt_ast=150)
+        result = triage_pgx_actionability("Tacrolimus", egfr_abnormal=True, alt_ast_abnormal=True)
         self.assertEqual(len(result["warnings"]), 2)
 
 
 class TestWarfarinTriage(unittest.TestCase):
-    def test_low_risk_defaults_to_consider(self):
-        result = triage_pgx_actionability("Warfarin", platelets=250, pt_inr=1.0)
+    def test_normal_labs_default_to_consider(self):
+        result = triage_pgx_actionability("Warfarin", platelets_abnormal=False, pt_inr_abnormal=False)
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
 
-    def test_unknown_labs_do_not_escalate(self):
+    def test_missing_labs_do_not_escalate(self):
         result = triage_pgx_actionability("Warfarin")
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
 
-    def test_low_platelets_escalates_to_high_priority(self):
-        result = triage_pgx_actionability("Warfarin", platelets=100)
+    def test_abnormal_platelets_escalates_to_high_priority(self):
+        result = triage_pgx_actionability("Warfarin", platelets_abnormal=True)
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
-    def test_high_pt_inr_escalates_to_high_priority(self):
-        result = triage_pgx_actionability("Warfarin", pt_inr=1.5)
+    def test_abnormal_pt_inr_escalates_to_high_priority(self):
+        result = triage_pgx_actionability("Warfarin", pt_inr_abnormal=True)
         self.assertEqual(result["triage"], TRIAGE_HIGH)
 
     def test_abnormal_coagulation_never_asserts_a_bleeding_risk_diagnosis(self):
-        result = triage_pgx_actionability("Warfarin", platelets=100)
+        result = triage_pgx_actionability("Warfarin", platelets_abnormal=True)
         self.assertFalse(any("bleeding risk" in w.lower() for w in result["warnings"]))
         self.assertTrue(any("Abnormal coagulation/CBC parameters" in w for w in result["warnings"]))
         coagulation_finding = result["clinical_findings"][0]
@@ -135,8 +159,8 @@ class TestNoneValuesNeverCrash(unittest.TestCase):
     def test_all_none_across_every_drug(self):
         for drug in ("Clopidogrel", "Tacrolimus", "Warfarin", "Ibuprofen"):
             result = triage_pgx_actionability(
-                drug, None, age=None, weight=None, egfr=None,
-                alt_ast=None, platelets=None, pt_inr=None,
+                drug, None, age=None, weight=None, egfr_abnormal=None,
+                alt_ast_abnormal=None, platelets_abnormal=None, pt_inr_abnormal=None,
             )
             self.assertIn("triage", result)
 
@@ -144,8 +168,8 @@ class TestNoneValuesNeverCrash(unittest.TestCase):
         for drug in ("Clopidogrel", "Tacrolimus", "Warfarin", "Ibuprofen"):
             for adr_flag in (True, False):
                 result = triage_pgx_actionability(
-                    drug, None, age=None, weight=None, egfr=None,
-                    alt_ast=None, platelets=None, pt_inr=None,
+                    drug, None, age=None, weight=None, egfr_abnormal=None,
+                    alt_ast_abnormal=None, platelets_abnormal=None, pt_inr_abnormal=None,
                     high_baseline_adr_risk=adr_flag,
                 )
                 self.assertIn("triage", result)
@@ -172,7 +196,7 @@ class TestBaselineAdrRiskIsAnOrthogonalCovariate(unittest.TestCase):
         # an elderly patient -- only a pathway-intersecting condition
         # (severe DDI, abnormal coagulation) may do that.
         result = triage_pgx_actionability(
-            "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
+            "Warfarin", [], age=70, platelets_abnormal=False, pt_inr_abnormal=False,
             high_baseline_adr_risk=True,
         )
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
@@ -184,7 +208,7 @@ class TestBaselineAdrRiskIsAnOrthogonalCovariate(unittest.TestCase):
 
     def test_warfarin_high_adr_risk_non_elderly_also_never_escalates(self):
         result = triage_pgx_actionability(
-            "Warfarin", [], age=40, platelets=250, pt_inr=1.0,
+            "Warfarin", [], age=40, platelets_abnormal=False, pt_inr_abnormal=False,
             high_baseline_adr_risk=True,
         )
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
@@ -192,7 +216,7 @@ class TestBaselineAdrRiskIsAnOrthogonalCovariate(unittest.TestCase):
 
     def test_warfarin_high_adr_risk_with_missing_age_never_crashes_or_escalates(self):
         result = triage_pgx_actionability(
-            "Warfarin", [], age=None, platelets=250, pt_inr=1.0,
+            "Warfarin", [], age=None, platelets_abnormal=False, pt_inr_abnormal=False,
             high_baseline_adr_risk=True,
         )
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
@@ -203,7 +227,7 @@ class TestBaselineAdrRiskIsAnOrthogonalCovariate(unittest.TestCase):
         # escalate to HIGH PRIORITY, independent of the ADR risk covariate.
         for adr_flag in (True, False):
             result = triage_pgx_actionability(
-                "Warfarin", [], platelets=100, pt_inr=1.0,
+                "Warfarin", [], platelets_abnormal=True, pt_inr_abnormal=False,
                 high_baseline_adr_risk=adr_flag,
             )
             self.assertEqual(result["triage"], TRIAGE_HIGH)
@@ -244,7 +268,7 @@ class TestGerontoNetScoreNeverEscalatesWarfarinAlone(unittest.TestCase):
         self.assertTrue(adr["high_baseline_adr_risk"])
 
         result = triage_pgx_actionability(
-            "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
+            "Warfarin", [], age=70, platelets_abnormal=False, pt_inr_abnormal=False,
             high_baseline_adr_risk=adr["high_baseline_adr_risk"],
         )
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
@@ -258,7 +282,7 @@ class TestGerontoNetScoreNeverEscalatesWarfarinAlone(unittest.TestCase):
         self.assertTrue(adr["high_baseline_adr_risk"])
 
         result = triage_pgx_actionability(
-            "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
+            "Warfarin", [], age=70, platelets_abnormal=False, pt_inr_abnormal=False,
             high_baseline_adr_risk=adr["high_baseline_adr_risk"],
         )
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
@@ -270,7 +294,7 @@ class TestGerontoNetScoreNeverEscalatesWarfarinAlone(unittest.TestCase):
         self.assertFalse(adr["high_baseline_adr_risk"])
 
         result = triage_pgx_actionability(
-            "Warfarin", [], age=70, platelets=250, pt_inr=1.0,
+            "Warfarin", [], age=70, platelets_abnormal=False, pt_inr_abnormal=False,
             high_baseline_adr_risk=adr["high_baseline_adr_risk"],
         )
         self.assertEqual(result["triage"], TRIAGE_CONSIDER)
@@ -292,6 +316,77 @@ class TestOutOfScopeDrug(unittest.TestCase):
         result = triage_pgx_actionability("Ibuprofen")
         self.assertEqual(result["triage"], TRIAGE_LOW)
         self.assertEqual(result["ddi_findings"], [])
+
+
+class TestCpicTestingRecommendation(unittest.TestCase):
+    """The Required/Recommended/Not Indicated output is a deterministic
+    projection of the resolved triage state alone."""
+
+    def test_high_priority_maps_to_required(self):
+        self.assertEqual(resolve_cpic_testing_recommendation(TRIAGE_HIGH), CPIC_TESTING_REQUIRED)
+
+    def test_consider_maps_to_recommended(self):
+        self.assertEqual(resolve_cpic_testing_recommendation(TRIAGE_CONSIDER), CPIC_TESTING_RECOMMENDED)
+
+    def test_low_priority_maps_to_not_indicated(self):
+        self.assertEqual(resolve_cpic_testing_recommendation(TRIAGE_LOW), CPIC_TESTING_NOT_INDICATED)
+
+    def test_unrecognized_state_defaults_to_not_indicated(self):
+        self.assertEqual(resolve_cpic_testing_recommendation("SOMETHING_ELSE"), CPIC_TESTING_NOT_INDICATED)
+
+    def test_triage_pgx_actionability_always_carries_the_projection(self):
+        for drug in ("Clopidogrel", "Tacrolimus", "Warfarin", "Ibuprofen"):
+            result = triage_pgx_actionability(drug)
+            self.assertEqual(
+                result["cpic_testing_recommendation"],
+                resolve_cpic_testing_recommendation(result["triage"]),
+            )
+
+    def test_clopidogrel_is_always_required(self):
+        result = triage_pgx_actionability("Clopidogrel")
+        self.assertEqual(result["cpic_testing_recommendation"], CPIC_TESTING_REQUIRED)
+
+    def test_warfarin_defaults_to_recommended(self):
+        result = triage_pgx_actionability("Warfarin")
+        self.assertEqual(result["cpic_testing_recommendation"], CPIC_TESTING_RECOMMENDED)
+
+    def test_out_of_scope_drug_is_not_indicated(self):
+        result = triage_pgx_actionability("Ibuprofen")
+        self.assertEqual(result["cpic_testing_recommendation"], CPIC_TESTING_NOT_INDICATED)
+
+
+class TestGenomeIndiaPopulationPriorityIsDecoupled(unittest.TestCase):
+    """CRITICAL DECOUPLING: the mock GenomeIndia ethnicity lookup is a pure
+    function of ethnicity alone. It must never appear inside
+    triage_pgx_actionability's return value, and no ethnicity value may
+    change the resolved triage state for any drug."""
+
+    def test_every_ethnicity_option_resolves_to_a_priority(self):
+        for ethnicity in ETHNICITY_OPTIONS:
+            result = genomeindia_population_priority(ethnicity)
+            self.assertIn(result["genomeindia_priority"], ("High Priority", "Medium Priority", "Low Priority"))
+            self.assertEqual(result["ethnicity"], ethnicity)
+
+    def test_unrecognized_ethnicity_defaults_to_low_priority(self):
+        result = genomeindia_population_priority("Unrecognized Group")
+        self.assertEqual(result["genomeindia_priority"], "Low Priority")
+
+    def test_genomeindia_output_never_appears_in_triage_result(self):
+        result = triage_pgx_actionability("Warfarin")
+        self.assertNotIn("genomeindia_priority", result)
+        self.assertNotIn("ethnicity", result)
+        self.assertNotIn("genomeindia_result", result)
+
+    def test_ethnicity_never_changes_the_resolved_triage_state_for_any_drug(self):
+        for drug in ("Clopidogrel", "Tacrolimus", "Warfarin", "Ibuprofen"):
+            baseline = triage_pgx_actionability(drug, platelets_abnormal=False, pt_inr_abnormal=False)
+            for ethnicity in ETHNICITY_OPTIONS:
+                # genomeindia_population_priority is computed, but its
+                # result is never fed back into triage_pgx_actionability --
+                # the two calls below are entirely independent.
+                genomeindia_population_priority(ethnicity)
+                repeated = triage_pgx_actionability(drug, platelets_abnormal=False, pt_inr_abnormal=False)
+                self.assertEqual(baseline["triage"], repeated["triage"])
 
 
 if __name__ == "__main__":
