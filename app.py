@@ -187,7 +187,8 @@ def _render_test_result_input(drug: str, test_type: str):
         )
         return None
     if spec["type"] == "select":
-        return st.selectbox("Test Result", spec["options"], help=spec.get("help"))
+        label = "Allele" if test_type == "Genotype" else "Test Result"
+        return st.selectbox(label, spec["options"], help=spec.get("help"))
     value = st.number_input(
         spec["label"], min_value=spec["min"], max_value=spec["max"],
         value=spec["default"], step=spec["step"], help=spec.get("help"),
@@ -260,14 +261,23 @@ _MOCK_CASE_REPORT_QUERIES = {
 }
 
 
+_WEB_SEARCH_QUERY_OPTIONS = ["ADR RISK", "FAMILY RISK", "ALLERGIC RISK"]
+_WEB_SEARCH_QUERY_KEY = {
+    "ADR RISK": "ADR Risk",
+    "FAMILY RISK": "Family Risk",
+    "ALLERGIC RISK": "Allergic Risk",
+}
+
+
 def _web_search_mockup(adatip_high: bool, allergy_history: bool, family_history: bool) -> None:
-    """Layer 2's Web Search mockup: three independent literature queries,
-    one per risk dimension (ADR Risk, Family Risk, Allergic Risk), each
-    evaluated against its own boolean input variable rather than a single
-    combined flag. No live search is performed server-side by PRISM-AIIMS
-    itself -- each query term links out to a real PubMed search so a
-    clinician can inspect actual literature, but the case counts below are
-    illustrative placeholders, not the result of an executed search.
+    """Layer 2's Web Search module: a single dropdown selects exactly one of
+    three independent query variables (ADR Risk, Family Risk, Allergic
+    Risk); only the selected query's own boolean input variable is
+    evaluated, and the other two are not read for this render. No live
+    search is performed server-side by PRISM-AIIMS itself -- the selected
+    query term links out to a real PubMed search so a clinician can inspect
+    actual literature, but the case count below is an illustrative
+    placeholder, not the result of an executed search.
     """
     st.markdown("**Web Search — Related Case Reports (Prototype)**")
     query_flags = {
@@ -275,15 +285,17 @@ def _web_search_mockup(adatip_high: bool, allergy_history: bool, family_history:
         "Family Risk": family_history,
         "Allergic Risk": allergy_history,
     }
-    for label, flag in query_flags.items():
-        case_count = 4 if flag else 1
-        url = _MOCK_CASE_REPORT_QUERIES[label]
-        st.markdown(
-            f"Querying literature for “{label}”... found {case_count} "
-            f"similar case report(s). [Search PubMed]({url})"
-        )
+    selected = st.selectbox("Query", _WEB_SEARCH_QUERY_OPTIONS, key="web_search_query")
+    label = _WEB_SEARCH_QUERY_KEY[selected]
+    flag = query_flags[label]
+    case_count = 4 if flag else 1
+    url = _MOCK_CASE_REPORT_QUERIES[label]
+    st.markdown(
+        f"Querying literature for “{label}”... found {case_count} "
+        f"similar case report(s) for evidence. [Search PubMed]({url})"
+    )
     st.caption(
-        "This preview's case counts are generated locally for demonstration "
+        "This preview's case count is generated locally for demonstration "
         "purposes; PRISM-AIIMS performs no server-side literature search of "
         "its own."
     )
@@ -455,6 +467,15 @@ with tab1:
             "contexts -- two statistically independent predictor sets over "
             "the same patient, each producing its own verdict below, with "
             "neither computation observing the other's internal state."
+        )
+        patient_condition = st.selectbox(
+            "Patient Condition", ["Acute Vulnerability", "Chronic Fragility"],
+            key="patient_condition",
+            help="A descriptive label only -- it does not gate either "
+                 "isolated execution context below. Both ADATIP (acute "
+                 "vulnerability) and GerontoNet (chronic fragility) always "
+                 "compute and render their own independent verdict "
+                 "regardless of this selection.",
         )
         adatip_col, gerontonet_col = st.columns(2)
         with adatip_col:
