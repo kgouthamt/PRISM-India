@@ -21,22 +21,108 @@ from engine.clinical import (
     assess_renal_function,
     calculate_adr_risk,
     calculate_gerontonet_score,
+    is_alt_ast_abnormal,
+    is_egfr_abnormal,
+    is_platelets_abnormal,
+    is_pt_inr_abnormal,
+    parse_lab_value,
 )
 
 
-class TestRenalFunction(unittest.TestCase):
-    """Renal function is a strict three-valued state -- True (abnormal),
-    False (normal), or None (missing data) -- never a numeric comparison."""
+class TestParseLabValue(unittest.TestCase):
+    """parse_lab_value is the sole text-to-float type-casting boundary for
+    every Layer 1 numeric lab field. It must never raise ValueError or
+    TypeError, regardless of input."""
 
-    def test_true_flag_is_reduced(self):
-        result = assess_renal_function(True)
+    def test_valid_integer_literal_casts_cleanly(self):
+        value, error = parse_lab_value("45")
+        self.assertEqual(value, 45.0)
+        self.assertIsNone(error)
+
+    def test_valid_float_literal_casts_cleanly(self):
+        value, error = parse_lab_value("59.9")
+        self.assertEqual(value, 59.9)
+        self.assertIsNone(error)
+
+    def test_empty_string_is_missing_data_not_an_error(self):
+        value, error = parse_lab_value("")
+        self.assertIsNone(value)
+        self.assertIsNone(error)
+
+    def test_whitespace_only_string_is_missing_data(self):
+        value, error = parse_lab_value("   ")
+        self.assertIsNone(value)
+        self.assertIsNone(error)
+
+    def test_none_token_is_case_insensitive_missing_data(self):
+        for token in ("none", "None", "NONE", "NoNe"):
+            value, error = parse_lab_value(token)
+            self.assertIsNone(value)
+            self.assertIsNone(error)
+
+    def test_n_slash_a_token_is_case_insensitive_missing_data(self):
+        for token in ("n/a", "N/A", "n/A"):
+            value, error = parse_lab_value(token)
+            self.assertIsNone(value)
+            self.assertIsNone(error)
+
+    def test_na_token_is_case_insensitive_missing_data(self):
+        for token in ("na", "NA", "Na"):
+            value, error = parse_lab_value(token)
+            self.assertIsNone(value)
+            self.assertIsNone(error)
+
+    def test_surrounding_whitespace_is_stripped_before_matching(self):
+        value, error = parse_lab_value("  none  ")
+        self.assertIsNone(value)
+        self.assertIsNone(error)
+
+    def test_python_none_input_never_raises_type_error(self):
+        value, error = parse_lab_value(None)
+        self.assertIsNone(value)
+        self.assertIsNone(error)
+
+    def test_unparseable_garbage_never_raises_value_error(self):
+        value, error = parse_lab_value("abc")
+        self.assertIsNone(value)
+        self.assertIsNotNone(error)
+        self.assertIn("abc", error)
+
+    def test_unparseable_mixed_alphanumeric_never_raises(self):
+        value, error = parse_lab_value("45mg/dL")
+        self.assertIsNone(value)
+        self.assertIsNotNone(error)
+
+    def test_negative_number_casts_cleanly(self):
+        value, error = parse_lab_value("-1.5")
+        self.assertEqual(value, -1.5)
+        self.assertIsNone(error)
+
+    def test_zero_casts_cleanly_and_is_not_missing_data(self):
+        value, error = parse_lab_value("0")
+        self.assertEqual(value, 0.0)
+        self.assertIsNone(error)
+
+
+class TestRenalFunction(unittest.TestCase):
+    """Renal function is resolved from a raw numeric eGFR reading (or
+    None) evaluated against a conditional threshold, never a pre-computed
+    boolean flag."""
+
+    def test_below_threshold_is_reduced(self):
+        result = assess_renal_function(EGFR_THRESHOLD - 0.1)
         self.assertEqual(result["renal_function_status"], "REDUCED")
 
-    def test_false_flag_is_normal(self):
-        result = assess_renal_function(False)
+    def test_at_threshold_is_normal(self):
+        # The conditional is strict-less-than: exactly at threshold is NOT abnormal.
+        result = assess_renal_function(EGFR_THRESHOLD)
         self.assertEqual(result["renal_function_status"], "NORMAL")
 
-    def test_none_flag_is_unknown_and_never_flags(self):
+    def test_above_threshold_is_normal(self):
+        result = assess_renal_function(90.0)
+        self.assertEqual(result["renal_function_status"], "NORMAL")
+
+    def test_none_is_unknown_and_never_flags(self):
         result = assess_renal_function(None)
         self.assertEqual(result["renal_function_status"], "UNKNOWN")
 
@@ -44,68 +130,93 @@ class TestRenalFunction(unittest.TestCase):
         result = assess_renal_function()
         self.assertEqual(result["renal_function_status"], "UNKNOWN")
 
-    def test_true_immediately_transitions_to_abnormal_state(self):
-        # Marking a lab True must produce the ABNORMAL -> FLAG transition
-        # with no intermediate step.
-        result = assess_renal_function(True)
-        self.assertNotEqual(result["renal_function_status"], "NORMAL")
-        self.assertNotEqual(result["renal_function_status"], "UNKNOWN")
-
     def test_reduced_detail_uses_the_required_wording(self):
-        result = assess_renal_function(True)
-        self.assertIn("Reduced eGFR flagged as abnormal; requires clinical correlation", result["detail"])
+        result = assess_renal_function(30.0)
+        self.assertIn("Reduced eGFR", result["detail"])
+        self.assertIn("requires clinical correlation for renal dose adjustment", result["detail"])
         self.assertNotIn("nephrotoxicity risk", result["detail"].lower())
 
     def test_reduced_detail_cites_kdigo_reference_threshold(self):
-        result = assess_renal_function(True)
+        result = assess_renal_function(30.0)
         self.assertIn("KDIGO 2024", result["detail"])
         self.assertIn(str(EGFR_THRESHOLD), result["detail"])
 
     def test_source_is_kdigo_2024(self):
-        self.assertEqual(assess_renal_function(False)["source"], "KDIGO 2024")
+        self.assertEqual(assess_renal_function(90.0)["source"], "KDIGO 2024")
 
-    def test_egfr_abnormal_field_echoes_input(self):
-        self.assertTrue(assess_renal_function(True)["egfr_abnormal"])
-        self.assertFalse(assess_renal_function(False)["egfr_abnormal"])
-        self.assertIsNone(assess_renal_function(None)["egfr_abnormal"])
+    def test_egfr_field_echoes_parsed_value(self):
+        self.assertEqual(assess_renal_function(30.0)["egfr"], 30.0)
+        self.assertEqual(assess_renal_function(90.0)["egfr"], 90.0)
+        self.assertIsNone(assess_renal_function(None)["egfr"])
+
+
+class TestIsEgfrAbnormal(unittest.TestCase):
+    def test_below_threshold_is_abnormal(self):
+        self.assertTrue(is_egfr_abnormal(EGFR_THRESHOLD - 0.1))
+
+    def test_at_threshold_is_not_abnormal(self):
+        self.assertFalse(is_egfr_abnormal(EGFR_THRESHOLD))
+
+    def test_none_is_not_abnormal(self):
+        self.assertFalse(is_egfr_abnormal(None))
 
 
 class TestHepaticFunction(unittest.TestCase):
-    """Hepatic transaminase state is a strict three-valued flag, never a
-    numeric comparison."""
+    """Hepatic transaminase state is resolved from a raw numeric ALT/AST
+    reading (or None) evaluated against a conditional threshold."""
 
-    def test_true_flag_is_elevated(self):
-        result = assess_hepatic_function(True)
+    def test_above_threshold_is_elevated(self):
+        result = assess_hepatic_function(ALT_AST_THRESHOLD + 0.1)
         self.assertEqual(result["transaminase_status"], "ELEVATED")
 
-    def test_false_flag_is_normal(self):
-        result = assess_hepatic_function(False)
+    def test_at_threshold_is_normal(self):
+        result = assess_hepatic_function(ALT_AST_THRESHOLD)
         self.assertEqual(result["transaminase_status"], "NORMAL")
 
-    def test_none_flag_is_unknown_and_never_flags(self):
+    def test_below_threshold_is_normal(self):
+        result = assess_hepatic_function(25.0)
+        self.assertEqual(result["transaminase_status"], "NORMAL")
+
+    def test_none_is_unknown_and_never_flags(self):
         result = assess_hepatic_function(None)
         self.assertEqual(result["transaminase_status"], "UNKNOWN")
 
     def test_elevated_detail_uses_the_required_wording(self):
-        result = assess_hepatic_function(True)
-        self.assertIn("Elevated transaminases flagged as abnormal; laboratory abnormality", result["detail"])
+        result = assess_hepatic_function(150.0)
+        self.assertIn("Elevated transaminases", result["detail"])
         self.assertNotIn("hepatic impairment", result["detail"].lower())
 
     def test_elevated_detail_cites_nfi_reference_threshold(self):
-        result = assess_hepatic_function(True)
+        result = assess_hepatic_function(150.0)
         self.assertIn("NFI", result["detail"])
         self.assertIn(str(ALT_AST_THRESHOLD), result["detail"])
 
     def test_source_is_cdsco_nfi(self):
-        self.assertIn("CDSCO", assess_hepatic_function(False)["source"])
+        self.assertIn("CDSCO", assess_hepatic_function(25.0)["source"])
+
+    def test_alt_ast_field_echoes_parsed_value(self):
+        self.assertEqual(assess_hepatic_function(150.0)["alt_ast"], 150.0)
+        self.assertIsNone(assess_hepatic_function(None)["alt_ast"])
+
+
+class TestIsAltAstAbnormal(unittest.TestCase):
+    def test_above_threshold_is_abnormal(self):
+        self.assertTrue(is_alt_ast_abnormal(ALT_AST_THRESHOLD + 0.1))
+
+    def test_at_threshold_is_not_abnormal(self):
+        self.assertFalse(is_alt_ast_abnormal(ALT_AST_THRESHOLD))
+
+    def test_none_is_not_abnormal(self):
+        self.assertFalse(is_alt_ast_abnormal(None))
 
 
 class TestBleedingRiskLabs(unittest.TestCase):
-    """Coagulation/CBC state is resolved from two independent three-valued
-    flags, never a numeric comparison."""
+    """Coagulation/CBC state is resolved from two independent raw numeric
+    readings (or None), each evaluated against its own conditional
+    threshold."""
 
-    def test_both_false_is_normal(self):
-        result = assess_bleeding_risk_labs(False, False)
+    def test_normal_values_are_normal(self):
+        result = assess_bleeding_risk_labs(250.0, 1.0)
         self.assertEqual(result["coagulation_cbc_status"], "NORMAL")
         self.assertEqual(result["flags"], [])
 
@@ -114,30 +225,57 @@ class TestBleedingRiskLabs(unittest.TestCase):
         self.assertEqual(result["coagulation_cbc_status"], "UNKNOWN")
         self.assertEqual(result["flags"], [])
 
-    def test_platelets_true_is_abnormal(self):
-        result = assess_bleeding_risk_labs(True, False)
-        self.assertEqual(result["coagulation_cbc_status"], "ABNORMAL")
-
-    def test_pt_inr_true_is_abnormal(self):
-        result = assess_bleeding_risk_labs(False, True)
-        self.assertEqual(result["coagulation_cbc_status"], "ABNORMAL")
-
-    def test_one_flag_false_other_none_is_normal(self):
-        result = assess_bleeding_risk_labs(False, None)
+    def test_platelets_at_threshold_is_normal(self):
+        result = assess_bleeding_risk_labs(PLATELETS_THRESHOLD, 1.0)
         self.assertEqual(result["coagulation_cbc_status"], "NORMAL")
-        result2 = assess_bleeding_risk_labs(None, False)
+
+    def test_platelets_below_threshold_is_abnormal(self):
+        result = assess_bleeding_risk_labs(PLATELETS_THRESHOLD - 1, 1.0)
+        self.assertEqual(result["coagulation_cbc_status"], "ABNORMAL")
+
+    def test_pt_inr_at_threshold_is_normal(self):
+        result = assess_bleeding_risk_labs(250.0, PT_INR_THRESHOLD)
+        self.assertEqual(result["coagulation_cbc_status"], "NORMAL")
+
+    def test_pt_inr_above_threshold_is_abnormal(self):
+        result = assess_bleeding_risk_labs(250.0, PT_INR_THRESHOLD + 0.1)
+        self.assertEqual(result["coagulation_cbc_status"], "ABNORMAL")
+
+    def test_one_value_known_normal_other_none_is_normal(self):
+        result = assess_bleeding_risk_labs(250.0, None)
+        self.assertEqual(result["coagulation_cbc_status"], "NORMAL")
+        result2 = assess_bleeding_risk_labs(None, 1.0)
         self.assertEqual(result2["coagulation_cbc_status"], "NORMAL")
 
     def test_abnormal_detail_uses_the_required_wording(self):
-        result = assess_bleeding_risk_labs(True, False)
+        result = assess_bleeding_risk_labs(PLATELETS_THRESHOLD - 1, 1.0)
         self.assertIn("Abnormal coagulation/CBC parameters", result["detail"])
         self.assertNotIn("bleeding risk", result["detail"].lower())
 
-    def test_abnormal_flags_cite_reference_thresholds(self):
-        result = assess_bleeding_risk_labs(True, True)
-        combined = " ".join(result["flags"])
-        self.assertIn(str(PLATELETS_THRESHOLD), combined)
-        self.assertIn(str(PT_INR_THRESHOLD), combined)
+    def test_platelets_and_pt_inr_fields_echo_parsed_values(self):
+        result = assess_bleeding_risk_labs(100.0, 1.5)
+        self.assertEqual(result["platelets"], 100.0)
+        self.assertEqual(result["pt_inr"], 1.5)
+
+
+class TestCoagulationThresholdPredicates(unittest.TestCase):
+    def test_platelets_below_threshold_is_abnormal(self):
+        self.assertTrue(is_platelets_abnormal(PLATELETS_THRESHOLD - 1))
+
+    def test_platelets_at_threshold_is_not_abnormal(self):
+        self.assertFalse(is_platelets_abnormal(PLATELETS_THRESHOLD))
+
+    def test_platelets_none_is_not_abnormal(self):
+        self.assertFalse(is_platelets_abnormal(None))
+
+    def test_pt_inr_above_threshold_is_abnormal(self):
+        self.assertTrue(is_pt_inr_abnormal(PT_INR_THRESHOLD + 0.1))
+
+    def test_pt_inr_at_threshold_is_not_abnormal(self):
+        self.assertFalse(is_pt_inr_abnormal(PT_INR_THRESHOLD))
+
+    def test_pt_inr_none_is_not_abnormal(self):
+        self.assertFalse(is_pt_inr_abnormal(None))
 
 
 class TestAgeWeightContext(unittest.TestCase):

@@ -1,10 +1,19 @@
 import html
 import json
+import urllib.parse
 
 import streamlit as st
 
 from abdm.fhir_builder import generate_fhir_bundle
-from engine.clinical import ADR_RISK_HIGH, calculate_adr_risk
+from engine.clinical import (
+    ADR_RISK_HIGH,
+    calculate_adr_risk,
+    is_alt_ast_abnormal,
+    is_egfr_abnormal,
+    is_pt_inr_abnormal,
+    is_platelets_abnormal,
+    parse_lab_value,
+)
 from engine.ddi import ALL_INTERACTING_DRUGS
 from engine.rules import (
     EVIDENCE_SOURCE,
@@ -279,36 +288,43 @@ def _render_test_result_input(drug: str, test_type: str):
     return str(value)
 
 
-_LAB_FLAG_OPTIONS = ["Missing Data", "Normal", "Abnormal"]
-_LAB_FLAG_STATE = {"Missing Data": None, "Normal": False, "Abnormal": True}
+def _lab_numeric_input(label: str, key: str, threshold_help: str, is_abnormal_fn) -> float:
+    """Render a free-text numeric entry for a single Layer 1 laboratory
+    parameter and type-cast it via engine.clinical.parse_lab_value(): an
+    empty string, "none", "n/a", or "na" (case-insensitive) all cast to
+    the None sentinel (missing data) by definition; any other text that
+    fails the underlying float(...) cast also degrades to None -- with an
+    inline caption surfaced to the clinician -- rather than raising
+    ValueError/TypeError up through the component tree. The instant the
+    parsed value satisfies this parameter's own conditional threshold
+    (`is_abnormal_fn`), an inline ABNORMAL -> FLAG badge renders beside
+    the input; a missing or in-range value renders MISSING or NORMAL
+    instead.
 
-
-def _lab_flag_input(label: str, key: str):
-    """Render a strict three-valued state selector for a single Layer 1
-    laboratory parameter: True (Abnormal), False (Normal), or None (Missing
-    Data) -- never a raw numeric reading. Selecting Abnormal immediately
-    transitions this parameter's backend state to ABNORMAL -> FLAG the
-    instant the widget resolves; there is no intermediate numeric
-    comparison anywhere downstream of this function.
-
-    Rendering only: the segmented-control radio and its resulting state
-    are placed in a two-column sub-tree so the flag badge sits inline,
-    beside its own parameter, instead of interrupting the page as a
-    full-width alert block.
+    Returns the parsed float, or None for missing/unparseable data --
+    this is the raw numeric reading passed straight into
+    engine.triage.triage_pgx_actionability(), which performs no threshold
+    comparison of its own.
     """
     control_col, badge_col = st.columns([3, 1])
     with control_col:
-        choice = st.radio(label, _LAB_FLAG_OPTIONS, horizontal=True, key=key)
-    flag = _LAB_FLAG_STATE[choice]
+        raw_text = st.text_input(
+            label, key=key,
+            placeholder="Numeric value, or blank / None / N/A for missing data",
+            help=threshold_help,
+        )
+    value, error = parse_lab_value(raw_text)
     with badge_col:
         st.markdown("<div style='height: 1.9rem'></div>", unsafe_allow_html=True)
-        if flag is True:
-            st.markdown("<span class='flag-badge'>ABNORMAL → FLAG</span>", unsafe_allow_html=True)
-        elif flag is False:
-            st.markdown("<span class='flag-badge flag-badge-normal'>NORMAL</span>", unsafe_allow_html=True)
-        else:
+        if value is None:
             st.markdown("<span class='flag-badge flag-badge-unknown'>MISSING</span>", unsafe_allow_html=True)
-    return flag
+        elif is_abnormal_fn(value):
+            st.markdown("<span class='flag-badge'>ABNORMAL → FLAG</span>", unsafe_allow_html=True)
+        else:
+            st.markdown("<span class='flag-badge flag-badge-normal'>NORMAL</span>", unsafe_allow_html=True)
+    if error:
+        st.caption(f"⚠ {error}")
+    return value
 
 
 TACROLIMUS_INDICATION_OPTIONS = ["Kidney Transplant", "Liver Transplant", "Other / Unspecified"]
@@ -350,46 +366,35 @@ def _alert_card(level: str, title: str, body_html: str) -> None:
     )
 
 
-_MOCK_CASE_REPORT_QUERIES = {
-    "ADR Risk": "https://pubmed.ncbi.nlm.nih.gov/?term=adverse+drug+reaction+case+report",
-    "Family Risk": "https://pubmed.ncbi.nlm.nih.gov/?term=familial+pharmacogenomic+risk+case+report",
-    "Allergic Risk": "https://pubmed.ncbi.nlm.nih.gov/?term=drug+allergy+case+report",
-}
-
-
-_WEB_SEARCH_QUERY_OPTIONS = ["ADR RISK", "FAMILY RISK", "ALLERGIC RISK"]
-_WEB_SEARCH_QUERY_KEY = {
-    "ADR RISK": "ADR Risk",
-    "FAMILY RISK": "Family Risk",
-    "ALLERGIC RISK": "Allergic Risk",
-}
-
-
-def _web_search_mockup(adatip_high: bool, allergy_history: bool, family_history: bool) -> None:
-    """Layer 2's Web Search module: a single dropdown selects exactly one of
-    three independent query variables (ADR Risk, Family Risk, Allergic
-    Risk); only the selected query's own boolean input variable is
-    evaluated, and the other two are not read for this render. No live
-    search is performed server-side by PRISM-AIIMS itself -- the selected
-    query term links out to a real PubMed search so a clinician can inspect
-    actual literature, but the case count below is an illustrative
-    placeholder, not the result of an executed search.
+def _web_search_mockup(high_risk_context: bool) -> None:
+    """Layer 2's Web Search module: free-text query ingestion replacing
+    the previous closed-vocabulary dropdown. The submitted string is
+    opaque text, never parsed against or matched to a fixed token set --
+    it is stored verbatim in session state and echoed back inside a mock
+    conversational response, with a placeholder case-report link built
+    directly from that same text. No live search is executed server-side
+    by PRISM-AIIMS itself; the outbound link opens a real PubMed search
+    scoped to the clinician's own query text.
     """
     st.markdown("**Web Search — Related Case Reports (Prototype)**")
-    query_flags = {
-        "ADR Risk": adatip_high,
-        "Family Risk": family_history,
-        "Allergic Risk": allergy_history,
-    }
-    selected = st.selectbox("Query", _WEB_SEARCH_QUERY_OPTIONS, key="web_search_query")
-    label = _WEB_SEARCH_QUERY_KEY[selected]
-    flag = query_flags[label]
-    case_count = 4 if flag else 1
-    url = _MOCK_CASE_REPORT_QUERIES[label]
-    st.markdown(
-        f"Querying literature for “{label}”... found {case_count} "
-        f"similar case report(s) for evidence. [Search PubMed]({url})"
+    query_text = st.text_input(
+        "Query clinical literature or search similar case reports...",
+        key="web_search_query_text",
+        placeholder="e.g. elderly patient warfarin bleeding risk",
     )
+    if st.button("Search", key="web_search_submit") and query_text.strip():
+        st.session_state["web_search_last_query"] = query_text.strip()
+
+    last_query = st.session_state.get("web_search_last_query")
+    if last_query:
+        case_count = 4 if high_risk_context else 2
+        url = f"https://pubmed.ncbi.nlm.nih.gov/?term={urllib.parse.quote_plus(last_query)}"
+        st.markdown(f"**You searched:** `{last_query}`")
+        st.markdown(
+            f"Simulated search complete — found {case_count} similar case "
+            f"report(s) for evidence relevant to this query. "
+            f"[Search PubMed for this query]({url})"
+        )
     st.caption(
         "This preview's case count is generated locally for demonstration "
         "purposes; PRISM-AIIMS performs no server-side literature search of "
@@ -541,19 +546,36 @@ with tab1:
 
         st.markdown("**Laboratory Data**")
         st.caption(
-            "Each parameter is a strict three-valued state -- Abnormal "
-            "(True), Normal (False), or Missing Data (None). This boolean/"
-            "None flag, not a numeric reading, is what crosses into the "
-            "backend state machine below. Marking a parameter Abnormal "
-            "immediately transitions it to its ABNORMAL → FLAG state."
+            "Enter each parameter's raw numeric value, or leave it blank "
+            "(equivalently, type None or N/A) for missing data. Each entry "
+            "is type-cast from text to a floating-point value and "
+            "evaluated against its own conditional threshold; a value "
+            "satisfying that threshold immediately transitions it to its "
+            "ABNORMAL → FLAG state."
         )
         lab_col1, lab_col2 = st.columns(2)
         with lab_col1:
-            egfr_abnormal = _lab_flag_input("eGFR (Renal Function)", key="egfr_flag")
-            alt_ast_abnormal = _lab_flag_input("ALT/AST (Hepatic Function)", key="alt_ast_flag")
+            egfr = _lab_numeric_input(
+                "eGFR (mL/min/1.73m²)", key="egfr_input",
+                threshold_help="KDIGO 2024 conditional threshold: eGFR < 60 sets Abnormal.",
+                is_abnormal_fn=is_egfr_abnormal,
+            )
+            alt_ast = _lab_numeric_input(
+                "ALT/AST (U/L)", key="alt_ast_input",
+                threshold_help="NFI conditional threshold: ALT/AST > 40 sets Abnormal.",
+                is_abnormal_fn=is_alt_ast_abnormal,
+            )
         with lab_col2:
-            platelets_abnormal = _lab_flag_input("Platelets (Coagulation/CBC)", key="platelets_flag")
-            pt_inr_abnormal = _lab_flag_input("PT/INR (Coagulation/CBC)", key="pt_inr_flag")
+            platelets = _lab_numeric_input(
+                "Platelets (x10⁹/L)", key="platelets_input",
+                threshold_help="Conditional threshold: platelets < 150 sets Abnormal.",
+                is_abnormal_fn=is_platelets_abnormal,
+            )
+            pt_inr = _lab_numeric_input(
+                "PT/INR (ratio)", key="pt_inr_input",
+                threshold_help="Conditional threshold: PT/INR > 1.2 sets Abnormal.",
+                is_abnormal_fn=is_pt_inr_abnormal,
+            )
 
     st.session_state["patient_age"] = age
 
@@ -670,12 +692,10 @@ with tab1:
     # Rendering placement only: the Web Search module is relocated out of
     # the primary Layer 2 component subtree and into the sidebar, so it
     # reads as an auxiliary reference panel a clinician can consult without
-    # it interrupting the main clinical form's top-to-bottom flow. Its own
-    # inputs (adatip_high, allergy_history, family_history) and internal
-    # logic are unchanged from the Layer 2 computation above.
+    # it interrupting the main clinical form's top-to-bottom flow.
     with st.sidebar:
         st.markdown("---")
-        _web_search_mockup(adatip_high, allergy_history, family_history)
+        _web_search_mockup(adatip_high or allergy_history or family_history)
 
     st.markdown("<span class='layer-kicker'>Testing Pathway</span>", unsafe_allow_html=True)
     st.header("Layer 3: Pharmacogenomics")
@@ -800,8 +820,8 @@ with tab1:
                     triage_result = triage_pgx_actionability(
                         drug, concurrent_medications,
                         age=age, weight=weight,
-                        egfr_abnormal=egfr_abnormal, alt_ast_abnormal=alt_ast_abnormal,
-                        platelets_abnormal=platelets_abnormal, pt_inr_abnormal=pt_inr_abnormal,
+                        egfr=egfr, alt_ast=alt_ast,
+                        platelets=platelets, pt_inr=pt_inr,
                         high_baseline_adr_risk=adr_result["high_baseline_adr_risk"],
                     )
                     st.session_state["triage_result"] = triage_result
@@ -940,15 +960,20 @@ with tab1:
                 "reported below without being merged into any other value."
             )
 
-            st.markdown("**Layer 1 — Clinical Details (Laboratory Flags)**")
-            lab_flag_summary = {
-                "eGFR (Renal Function)": egfr_abnormal,
-                "ALT/AST (Hepatic Function)": alt_ast_abnormal,
-                "Platelets (Coagulation/CBC)": platelets_abnormal,
-                "PT/INR (Coagulation/CBC)": pt_inr_abnormal,
+            st.markdown("**Layer 1 — Clinical Details (Laboratory Values)**")
+            lab_value_summary = {
+                "eGFR (Renal Function)": (egfr, is_egfr_abnormal(egfr)),
+                "ALT/AST (Hepatic Function)": (alt_ast, is_alt_ast_abnormal(alt_ast)),
+                "Platelets (Coagulation/CBC)": (platelets, is_platelets_abnormal(platelets)),
+                "PT/INR (Coagulation/CBC)": (pt_inr, is_pt_inr_abnormal(pt_inr)),
             }
-            for label, flag in lab_flag_summary.items():
-                state = "ABNORMAL → FLAG" if flag is True else ("Normal" if flag is False else "Missing Data")
+            for label, (value, abnormal) in lab_value_summary.items():
+                if value is None:
+                    state = "Missing Data"
+                elif abnormal:
+                    state = f"{value} — ABNORMAL → FLAG"
+                else:
+                    state = f"{value} — Normal"
                 st.markdown(f"- {label}: **{state}**")
 
             st.markdown("**Layer 2 — ADR Risk Prediction (Isolated Verdicts)**")

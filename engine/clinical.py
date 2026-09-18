@@ -3,24 +3,36 @@ the PRISM-AIIMS pipeline.
 
 STATE MODEL
 
-Every laboratory parameter this module consumes is a three-valued logical
-state, not a numeric quantity compared against a threshold at runtime: a
-clinician reduces a lab reading, at the point of entry, to exactly one of
-three mutually exclusive states -- ABNORMAL (the boolean `True`), NORMAL
-(the boolean `False`), or MISSING (`None`) -- and every `assess_*` function
-below is a pure state-transition function over that three-valued input: it
-never re-derives the state from a raw number, and it never treats a missing
-state as evidence for either of the other two. Passing `True` for a
-parameter transitions its corresponding status field immediately to its
-ABNORMAL state (e.g. `renal_function_status` -> "REDUCED"); there is no
-intermediate comparison step. The published thresholds a clinician would
-reference when rendering that True/False judgment (e.g. eGFR < 60
-mL/min/1.73m^2 per KDIGO 2024) are retained below only as named reference
-constants surfaced in each function's `detail` string -- they document the
-clinical judgment already made upstream, they are not re-evaluated here.
+Every laboratory parameter this module consumes is ingested as raw text,
+type-cast to a floating-point value, and then reduced to one of three
+mutually exclusive states -- ABNORMAL (`True`), NORMAL (`False`), or
+MISSING (`None`) -- by evaluating that value against a named conditional
+threshold. This is a two-stage pipeline, and the two stages are
+deliberately kept as separate functions:
+
+    1. Text parsing (`parse_lab_value`): a string-to-float type cast with
+       explicit exception handling. The canonical missing-data tokens --
+       an empty string, "none", "n/a", or "na" (all case-insensitive,
+       leading/trailing whitespace stripped) -- type-cast to the `None`
+       sentinel by definition, not by a failed cast. Any other token that
+       fails `float(...)` (raises `ValueError`) is treated as unparseable:
+       the function returns `None` for the value and a human-readable
+       message for the caller to surface, rather than letting the
+       exception propagate up through the component tree.
+    2. Threshold evaluation (`assess_renal_function`, `assess_hepatic_
+       function`, `assess_bleeding_risk_labs`, and the `is_*_abnormal`
+       predicates they are built from): a pure conditional comparison of
+       an already-parsed float (or `None`) against a named numeric
+       threshold. `None` never satisfies any conditional threshold, so a
+       missing reading can never be evaluated as abnormal.
+
+Passing a value that satisfies a parameter's own conditional threshold
+transitions its corresponding status field immediately to its ABNORMAL
+state (e.g. `renal_function_status` -> "REDUCED"); there is no additional
+indirection between the threshold comparison and the returned state.
 
 Per clinical reviewer feedback, this module also deliberately separates a
-*laboratory abnormality* (a flagged out-of-range state) from a *clinical
+*laboratory abnormality* (a flagged out-of-range value) from a *clinical
 diagnosis* (a condition a clinician has actually established): no
 `assess_*` function below claims to detect "nephrotoxicity," "hepatic
 impairment," or "bleeding risk" outright -- a single abnormal flag is never,
@@ -29,15 +41,15 @@ plainly and states that it requires clinical correlation.
 
 Sources:
     - Renal function: KDIGO 2024 Clinical Practice Guideline for CKD
-      (eGFR < 60 mL/min/1.73m^2 is the reference threshold this MVP cites
-      for a clinician's own Abnormal/Normal judgment on renal function).
-    - Hepatic function: CDSCO / National Formulary of India (NFI), cited as
-      the reference threshold (ALT/AST > 40 U/L, the standard upper limit
-      of normal) for a clinician's own Abnormal/Normal judgment on hepatic
-      transaminases -- not to assert a hepatic-impairment diagnosis.
-    - Coagulation/CBC: routine reference thresholds (platelets < 150
-      x10^3/uL, PT/INR > 1.2) cited for a clinician's own Abnormal/Normal
-      judgment before starting an anticoagulant such as warfarin.
+      (eGFR < 60 mL/min/1.73m^2 is this MVP's conditional threshold for
+      flagging renal function abnormal).
+    - Hepatic function: CDSCO / National Formulary of India (NFI): ALT/AST
+      > 40 U/L (the standard upper limit of normal) is this MVP's
+      conditional threshold for flagging hepatic transaminases abnormal --
+      not for asserting a hepatic-impairment diagnosis.
+    - Coagulation/CBC: routine conditional thresholds (platelets < 150
+      x10^9/L, PT/INR > 1.2) evaluated before starting an anticoagulant
+      such as warfarin.
     - Age/weight dosing context: FDA guidance on pediatric and weight-based
       dosing.
     - Baseline ADR risk (calculate_adr_risk): two statistically independent
@@ -60,13 +72,18 @@ FDA_DOSING_SOURCE = "FDA Guidance (Pediatric / Weight-Based Dosing)"
 ADATIP_SOURCE = "ADATIP 9-Predictor Model (institutional acute-presentation ADR risk model)"
 GERONTONET_SOURCE = "GerontoNet ADR Risk Score (Onder et al., Arch Intern Med 2010)"
 
-# Reference thresholds a clinician cites when rendering the True/False/None
-# judgment captured at the system boundary -- documentation constants, not
-# values compared against a number anywhere in this module.
+# Conditional thresholds evaluated directly against a parsed numeric lab
+# value -- the sole source of truth for each parameter's Abnormal/Normal
+# state (see the module docstring's two-stage state model).
 EGFR_THRESHOLD = 60.0
 ALT_AST_THRESHOLD = 40.0
 PLATELETS_THRESHOLD = 150.0
 PT_INR_THRESHOLD = 1.2
+
+# Text tokens that type-cast to the None sentinel (missing data) by
+# definition, rather than by a failed float() cast. Matched case-
+# insensitively after stripping leading/trailing whitespace.
+_MISSING_DATA_TOKENS = frozenset({"", "none", "n/a", "na"})
 
 _PEDIATRIC_AGE_YEARS = 18
 _LOW_WEIGHT_KG = 40.0
@@ -104,130 +121,187 @@ ISOLATED_VERDICT_HIGH = "High Risk"
 ISOLATED_VERDICT_BASELINE = "Baseline Standard"
 
 
-def assess_renal_function(egfr_abnormal: bool = None) -> dict:
-    """Resolve renal-function state from a clinician-provided three-valued
-    flag -- this is a state transition over `True` (abnormal / reduced
-    eGFR), `False` (normal), or `None` (missing data), not a numeric
-    comparison; the function never receives or evaluates an exact eGFR
-    reading. This is a lab-abnormality state, not a nephrotoxicity or
-    renal-impairment diagnosis; it requires clinical correlation before any
-    dose adjustment.
+def parse_lab_value(raw_text) -> tuple:
+    """Type-cast a raw text-entry field into a float, with explicit
+    exception handling around the string-to-float conversion -- the sole
+    ingestion point every Layer 1 numeric lab field passes through before
+    any conditional threshold is evaluated.
 
-    `egfr_abnormal=True` immediately transitions `renal_function_status` to
-    its ABNORMAL state ("REDUCED"). `egfr_abnormal=None` (missing data)
-    never does.
+    The canonical missing-data tokens -- an empty string, "none", "n/a",
+    or "na" (case-insensitive, surrounding whitespace stripped) -- type-
+    cast to the `None` sentinel directly; this is a definitional mapping,
+    not a caught exception. Any other token is passed to `float(...)`
+    inside a `try`/`except ValueError` block: on success the parsed float
+    is returned; on failure -- the token is not a valid float literal --
+    the function returns `None` for the value (a parameter this module
+    cannot safely evaluate against a numeric threshold is treated as
+    missing, never guessed at) plus a human-readable message the caller
+    may surface, rather than letting `ValueError` propagate. `raw_text`
+    being `None` itself (not a string at all) is handled the same way,
+    with no `TypeError` raised.
 
-    Returns {"egfr_abnormal", "renal_function_status", "detail", "source"}.
+    Returns (value, error): `value` is a `float` or `None`; `error` is
+    `None` on a clean parse (including a clean missing-data-token parse)
+    or a message string when the input was neither a missing-data token
+    nor a valid float literal.
+    """
+    if raw_text is None:
+        return None, None
+    normalized = str(raw_text).strip()
+    if normalized.lower() in _MISSING_DATA_TOKENS:
+        return None, None
+    try:
+        return float(normalized), None
+    except ValueError:
+        return None, f"'{raw_text}' is not a recognized numeric value; treated as missing data."
+
+
+def is_egfr_abnormal(egfr: float = None) -> bool:
+    """Conditional threshold: eGFR < EGFR_THRESHOLD (KDIGO 2024). `None`
+    never satisfies this condition."""
+    return egfr is not None and egfr < EGFR_THRESHOLD
+
+
+def is_alt_ast_abnormal(alt_ast: float = None) -> bool:
+    """Conditional threshold: ALT/AST > ALT_AST_THRESHOLD (NFI). `None`
+    never satisfies this condition."""
+    return alt_ast is not None and alt_ast > ALT_AST_THRESHOLD
+
+
+def is_platelets_abnormal(platelets: float = None) -> bool:
+    """Conditional threshold: platelets < PLATELETS_THRESHOLD. `None`
+    never satisfies this condition."""
+    return platelets is not None and platelets < PLATELETS_THRESHOLD
+
+
+def is_pt_inr_abnormal(pt_inr: float = None) -> bool:
+    """Conditional threshold: PT/INR > PT_INR_THRESHOLD. `None` never
+    satisfies this condition."""
+    return pt_inr is not None and pt_inr > PT_INR_THRESHOLD
+
+
+def assess_renal_function(egfr: float = None) -> dict:
+    """Resolve renal-function state from an already-parsed eGFR value (see
+    `parse_lab_value` for the text-to-float ingestion stage) by evaluating
+    `is_egfr_abnormal`. This is a lab-abnormality state, not a
+    nephrotoxicity or renal-impairment diagnosis; it requires clinical
+    correlation before any dose adjustment.
+
+    `egfr` satisfying its conditional threshold immediately transitions
+    `renal_function_status` to its ABNORMAL state ("REDUCED"). `egfr=None`
+    (missing data) never does.
+
+    Returns {"egfr", "renal_function_status", "detail", "source"}.
     `renal_function_status` is REDUCED, NORMAL, or UNKNOWN.
     """
-    if egfr_abnormal is None:
+    if egfr is None:
         return {
-            "egfr_abnormal": None,
+            "egfr": None,
             "renal_function_status": "UNKNOWN",
-            "detail": "eGFR state not provided (missing data)",
+            "detail": "eGFR not provided (missing data)",
             "source": KDIGO_SOURCE,
         }
-    if egfr_abnormal:
+    if is_egfr_abnormal(egfr):
         return {
-            "egfr_abnormal": True,
+            "egfr": egfr,
             "renal_function_status": "REDUCED",
-            "detail": "Reduced eGFR flagged as abnormal; requires clinical "
-                      "correlation for renal dose adjustment (reference "
-                      f"threshold: eGFR < {EGFR_THRESHOLD} mL/min/1.73m², "
-                      "KDIGO 2024).",
+            "detail": f"Reduced eGFR ({egfr} mL/min/1.73m²); requires "
+                      "clinical correlation for renal dose adjustment "
+                      f"(KDIGO 2024 conditional threshold: eGFR < "
+                      f"{EGFR_THRESHOLD}).",
             "source": KDIGO_SOURCE,
         }
     return {
-        "egfr_abnormal": False,
+        "egfr": egfr,
         "renal_function_status": "NORMAL",
-        "detail": "eGFR flagged as normal (reference threshold: "
-                  f"{EGFR_THRESHOLD} mL/min/1.73m², KDIGO 2024).",
+        "detail": f"eGFR ({egfr} mL/min/1.73m²) is at or above the KDIGO "
+                  f"2024 conditional threshold of {EGFR_THRESHOLD}.",
         "source": KDIGO_SOURCE,
     }
 
 
-def assess_hepatic_function(alt_ast_abnormal: bool = None) -> dict:
-    """Resolve hepatic-transaminase state from a clinician-provided
-    three-valued flag -- a state transition over `True` (abnormal /
-    elevated ALT-AST), `False` (normal), or `None` (missing data), not a
-    numeric comparison. This is a lab-abnormality state, not a
-    hepatic-impairment diagnosis; it requires clinical correlation.
+def assess_hepatic_function(alt_ast: float = None) -> dict:
+    """Resolve hepatic-transaminase state from an already-parsed ALT/AST
+    value (see `parse_lab_value` for the text-to-float ingestion stage) by
+    evaluating `is_alt_ast_abnormal`. This is a lab-abnormality state, not
+    a hepatic-impairment diagnosis; it requires clinical correlation.
 
-    `alt_ast_abnormal=True` immediately transitions `transaminase_status`
-    to its ABNORMAL state ("ELEVATED"). `alt_ast_abnormal=None` (missing
-    data) never does.
+    `alt_ast` satisfying its conditional threshold immediately transitions
+    `transaminase_status` to its ABNORMAL state ("ELEVATED"). `alt_ast=
+    None` (missing data) never does.
 
-    Returns {"alt_ast_abnormal", "transaminase_status", "detail", "source"}.
+    Returns {"alt_ast", "transaminase_status", "detail", "source"}.
     `transaminase_status` is ELEVATED, NORMAL, or UNKNOWN.
     """
-    if alt_ast_abnormal is None:
+    if alt_ast is None:
         return {
-            "alt_ast_abnormal": None,
+            "alt_ast": None,
             "transaminase_status": "UNKNOWN",
-            "detail": "ALT/AST state not provided (missing data)",
+            "detail": "ALT/AST not provided (missing data)",
             "source": NFI_SOURCE,
         }
-    if alt_ast_abnormal:
+    if is_alt_ast_abnormal(alt_ast):
         return {
-            "alt_ast_abnormal": True,
+            "alt_ast": alt_ast,
             "transaminase_status": "ELEVATED",
-            "detail": "Elevated transaminases flagged as abnormal; "
+            "detail": f"Elevated transaminases (ALT/AST {alt_ast} U/L); "
                       "laboratory abnormality requiring clinical "
                       "correlation, not an automatic hepatic-impairment "
-                      f"diagnosis (reference threshold: ALT/AST > "
-                      f"{ALT_AST_THRESHOLD} U/L, NFI).",
+                      f"diagnosis (NFI conditional threshold: ALT/AST > "
+                      f"{ALT_AST_THRESHOLD} U/L).",
             "source": NFI_SOURCE,
         }
     return {
-        "alt_ast_abnormal": False,
+        "alt_ast": alt_ast,
         "transaminase_status": "NORMAL",
-        "detail": f"ALT/AST flagged as normal (reference threshold: "
-                  f"{ALT_AST_THRESHOLD} U/L, NFI).",
+        "detail": f"ALT/AST ({alt_ast} U/L) is within the NFI conditional "
+                  f"threshold of {ALT_AST_THRESHOLD} U/L.",
         "source": NFI_SOURCE,
     }
 
 
-def assess_bleeding_risk_labs(platelets_abnormal: bool = None, pt_inr_abnormal: bool = None) -> dict:
-    """Resolve coagulation/CBC state from two independent clinician-provided
-    three-valued flags -- relevant before starting an anticoagulant such as
-    warfarin. Each of `platelets_abnormal` and `pt_inr_abnormal` is a state
-    transition over `True` (abnormal), `False` (normal), or `None` (missing
-    data), not a numeric comparison. These are lab-abnormality states, not a
-    bleeding-risk diagnosis; they require clinical correlation.
+def assess_bleeding_risk_labs(platelets: float = None, pt_inr: float = None) -> dict:
+    """Resolve coagulation/CBC state from two independent already-parsed
+    values (see `parse_lab_value` for the text-to-float ingestion stage)
+    by evaluating `is_platelets_abnormal` and `is_pt_inr_abnormal` --
+    relevant before starting an anticoagulant such as warfarin. These are
+    lab-abnormality states, not a bleeding-risk diagnosis; they require
+    clinical correlation.
 
-    Either flag being `True` immediately transitions `coagulation_cbc_status`
-    to its ABNORMAL state. A flag of `None` (missing data) never does.
+    Either value satisfying its own conditional threshold immediately
+    transitions `coagulation_cbc_status` to its ABNORMAL state. A value of
+    `None` (missing data) never does.
 
-    Returns {"platelets_abnormal", "pt_inr_abnormal", "coagulation_cbc_status",
-    "detail", "flags", "source"}. `coagulation_cbc_status` is ABNORMAL,
-    NORMAL, or UNKNOWN; `flags` lists the specific parameter(s) flagged
-    abnormal.
+    Returns {"platelets", "pt_inr", "coagulation_cbc_status", "detail",
+    "flags", "source"}. `coagulation_cbc_status` is ABNORMAL, NORMAL, or
+    UNKNOWN; `flags` lists the specific parameter(s) that satisfied their
+    conditional threshold.
     """
     flags = []
-    if platelets_abnormal:
+    if is_platelets_abnormal(platelets):
         flags.append(
-            "Thrombocytopenia flagged as abnormal (reference threshold: "
-            f"platelets < {PLATELETS_THRESHOLD} x10³/µL)"
+            f"Thrombocytopenia (platelets {platelets} x10⁹/L, below the "
+            f"conditional threshold of {PLATELETS_THRESHOLD})"
         )
-    if pt_inr_abnormal:
+    if is_pt_inr_abnormal(pt_inr):
         flags.append(
-            "Elevated PT/INR flagged as abnormal (reference threshold: "
-            f"PT/INR > {PT_INR_THRESHOLD})"
+            f"Elevated PT/INR ({pt_inr}, above the conditional threshold "
+            f"of {PT_INR_THRESHOLD})"
         )
 
     if flags:
         status = "ABNORMAL"
         detail = "Abnormal coagulation/CBC parameters; requires clinical correlation."
-    elif platelets_abnormal is None and pt_inr_abnormal is None:
+    elif platelets is None and pt_inr is None:
         status = "UNKNOWN"
-        detail = "Coagulation/CBC state not provided (missing data)"
+        detail = "Coagulation/CBC parameters not provided (missing data)"
     else:
         status = "NORMAL"
         detail = "Coagulation/CBC parameters within normal limits."
 
     return {
-        "platelets_abnormal": platelets_abnormal,
-        "pt_inr_abnormal": pt_inr_abnormal,
+        "platelets": platelets,
+        "pt_inr": pt_inr,
         "coagulation_cbc_status": status,
         "detail": detail,
         "flags": flags,

@@ -9,10 +9,14 @@ or state-routing bugs, and asserting the integrated decision-matrix
 architecture: Testing Priority = f(PGx Actionability, Patient-Specific
 Clinical Context). Baseline ADR risk (Layer 2) is an orthogonal covariate
 that must never, by itself, transition the priority state -- only a
-pathway-intersecting clinical context (a severe DDI, or an abnormal-flagged
-lab state tied to the drug's own mechanism) may do that. It also verifies
-the CRITICAL DECOUPLING of the mock GenomeIndia ethnicity lookup from this
-pipeline.
+pathway-intersecting clinical context (a severe DDI, or a raw numeric lab
+reading crossing its own conditional threshold) may do that. It also
+verifies the CRITICAL DECOUPLING of the mock GenomeIndia ethnicity lookup
+from this pipeline.
+
+Every lab parameter below is the raw numeric value (or None) a clinician
+would type into Layer 1's free-text fields -- engine.clinical type-casts
+and threshold-evaluates it, this suite never pre-computes a boolean flag.
 
 Run with:
     pytest tests/test_final_integration.py -v
@@ -58,7 +62,7 @@ def test_case_1_healthy_baseline_defaults_to_consider():
 
     triage = triage_pgx_actionability(
         "Warfarin", [], age=25, weight=70.0,
-        platelets_abnormal=False, pt_inr_abnormal=False,
+        platelets=250.0, pt_inr=1.0,
         high_baseline_adr_risk=adr["high_baseline_adr_risk"],
     )
     assert triage["triage"] == TRIAGE_CONSIDER
@@ -67,8 +71,8 @@ def test_case_1_healthy_baseline_defaults_to_consider():
 
 def test_case_2_gerontonet_high_score_does_not_independently_escalate_warfarin():
     """An 85-year-old on 8 concurrent medications (+4 points) with a
-    previous ADR (+2 points) prescribed Warfarin, with entirely normal-
-    flagged labs and no drug-drug interaction.
+    previous ADR (+2 points) prescribed Warfarin, with entirely normal
+    labs and no drug-drug interaction.
 
     8 concurrent drugs and a previous ADR together score exactly 6/10 on
     the real GerontoNet math (>=8 drugs is +4, not a per-drug increment;
@@ -76,10 +80,10 @@ def test_case_2_gerontonet_high_score_does_not_independently_escalate_warfarin()
     4, so GerontoNet's own isolated verdict is High Risk. Per the
     integrated decision-matrix architecture, this Layer 2 covariate is
     orthogonal to Warfarin's own CYP2C9/VKORC1 pathway: with no
-    pathway-intersecting clinical context present (normal-flagged
-    coagulation, no severe DDI), the priority state must remain CONSIDER,
-    accompanied by a strong clinical warning surfacing the elevated
-    baseline risk -- not an automatic HIGH PRIORITY escalation.
+    pathway-intersecting clinical context present (normal labs, no severe
+    DDI), the priority state must remain CONSIDER, accompanied by a strong
+    clinical warning surfacing the elevated baseline risk -- not an
+    automatic HIGH PRIORITY escalation.
     """
     adr = calculate_adr_risk(age=85, num_drugs=8, previous_adr_history=True)
     assert adr["gerontonet_score"]["total_score"] == 6
@@ -90,7 +94,7 @@ def test_case_2_gerontonet_high_score_does_not_independently_escalate_warfarin()
 
     triage = triage_pgx_actionability(
         "Warfarin", [], age=85, weight=65.0,
-        platelets_abnormal=False, pt_inr_abnormal=False,
+        platelets=250.0, pt_inr=1.0,
         high_baseline_adr_risk=adr["high_baseline_adr_risk"],
     )
     assert triage["triage"] == TRIAGE_CONSIDER
@@ -101,7 +105,7 @@ def test_case_2_gerontonet_high_score_does_not_independently_escalate_warfarin()
 
 def test_case_3_adatip_high_score_does_not_independently_escalate_warfarin():
     """A 70-year-old presenting with syncope on admission while taking RAAS
-    drugs, prescribed Warfarin, with entirely normal-flagged labs and no
+    drugs, prescribed Warfarin, with entirely normal labs and no
     drug-drug interaction.
 
     Age >= 65 is itself one of the ADATIP 9-Predictor Model's own
@@ -121,7 +125,7 @@ def test_case_3_adatip_high_score_does_not_independently_escalate_warfarin():
 
     triage = triage_pgx_actionability(
         "Warfarin", [], age=70, weight=68.0,
-        platelets_abnormal=False, pt_inr_abnormal=False,
+        platelets=250.0, pt_inr=1.0,
         high_baseline_adr_risk=adr["high_baseline_adr_risk"],
     )
     assert triage["triage"] == TRIAGE_CONSIDER
@@ -148,15 +152,16 @@ def test_case_4_ddi_collision_clopidogrel_omeprazole():
 
 
 def test_case_5_tacrolimus_renal_and_hepatic_warnings():
-    """Tacrolimus prescribed with eGFR flagged abnormal (reduced) and
-    ALT/AST flagged abnormal (elevated) -- both pathway-intersecting lab
-    abnormalities.
+    """Tacrolimus prescribed with eGFR = 30 (below the 60 conditional
+    threshold) and ALT/AST = 60 (above the 40 conditional threshold) --
+    both pathway-intersecting lab abnormalities.
 
-    Both flags are True, so Tacrolimus's triage output must carry both
-    lab-abnormality warnings -- worded as abnormalities requiring clinical
-    correlation, never as a bare diagnosis.
+    Both raw numeric readings satisfy their own conditional threshold, so
+    Tacrolimus's triage output must carry both lab-abnormality warnings --
+    worded as abnormalities requiring clinical correlation, never as a
+    bare diagnosis.
     """
-    triage = triage_pgx_actionability("Tacrolimus", [], egfr_abnormal=True, alt_ast_abnormal=True)
+    triage = triage_pgx_actionability("Tacrolimus", [], egfr=30.0, alt_ast=60.0)
     assert triage["triage"] == TRIAGE_HIGH
     assert triage["cpic_testing_recommendation"] == CPIC_TESTING_REQUIRED
 
@@ -167,9 +172,10 @@ def test_case_5_tacrolimus_renal_and_hepatic_warnings():
 
 
 def test_case_6_null_and_blank_inputs_never_crash():
-    """A doctor leaves the entire form blank: every lab flag and the
-    medications field arrive as None (an empty text field parses to an
-    empty list in app.py, so both are exercised here), for Warfarin.
+    """A doctor leaves the entire form blank: every lab field parses to
+    None (an empty text field parses to None via parse_lab_value, and an
+    empty medications field parses to an empty list in app.py, so both are
+    exercised here), for Warfarin.
 
     Nothing may raise, and with no risk factors present anywhere, the
     system must fall back to the safe routine-monitoring default,
@@ -185,8 +191,8 @@ def test_case_6_null_and_blank_inputs_never_crash():
     for blank_medications in (None, []):
         triage = triage_pgx_actionability(
             "Warfarin", blank_medications,
-            age=None, weight=None, egfr_abnormal=None, alt_ast_abnormal=None,
-            platelets_abnormal=None, pt_inr_abnormal=None,
+            age=None, weight=None, egfr=None, alt_ast=None,
+            platelets=None, pt_inr=None,
             high_baseline_adr_risk=adr["high_baseline_adr_risk"],
         )
         assert triage["triage"] == TRIAGE_CONSIDER
@@ -194,8 +200,8 @@ def test_case_6_null_and_blank_inputs_never_crash():
     # Every MVP drug must tolerate a fully blank submission without raising.
     for drug in ("Clopidogrel", "Tacrolimus", "Warfarin"):
         result = triage_pgx_actionability(
-            drug, None, age=None, weight=None, egfr_abnormal=None,
-            alt_ast_abnormal=None, platelets_abnormal=None, pt_inr_abnormal=None,
+            drug, None, age=None, weight=None, egfr=None,
+            alt_ast=None, platelets=None, pt_inr=None,
             high_baseline_adr_risk=False,
         )
         assert "triage" in result
@@ -223,17 +229,17 @@ def test_case_8_genomeindia_lookup_is_fully_decoupled_from_the_pipeline():
     or Layer 2 outputs, and must never influence Layer 3's resolved
     Testing-Priority state.
 
-    A pathway-intersecting Warfarin profile (abnormal-flagged coagulation)
-    resolves to HIGH PRIORITY regardless of which ethnicity's GenomeIndia
-    priority is looked up alongside it -- and a neutral profile stays at
-    CONSIDER the same way. The lookup's own return value never appears
-    inside triage_pgx_actionability's result.
+    A pathway-intersecting Warfarin profile (platelets below the 150
+    conditional threshold) resolves to HIGH PRIORITY regardless of which
+    ethnicity's GenomeIndia priority is looked up alongside it -- and a
+    neutral profile stays at CONSIDER the same way. The lookup's own return
+    value never appears inside triage_pgx_actionability's result.
     """
     high_priority_profile_triage = triage_pgx_actionability(
-        "Warfarin", [], platelets_abnormal=True, pt_inr_abnormal=False,
+        "Warfarin", [], platelets=100.0, pt_inr=1.0,
     )
     neutral_profile_triage = triage_pgx_actionability(
-        "Warfarin", [], platelets_abnormal=False, pt_inr_abnormal=False,
+        "Warfarin", [], platelets=250.0, pt_inr=1.0,
     )
 
     for ethnicity in ETHNICITY_OPTIONS:
@@ -245,10 +251,10 @@ def test_case_8_genomeindia_lookup_is_fully_decoupled_from_the_pipeline():
         assert "genomeindia_priority" not in neutral_profile_triage
 
         repeated_high = triage_pgx_actionability(
-            "Warfarin", [], platelets_abnormal=True, pt_inr_abnormal=False,
+            "Warfarin", [], platelets=100.0, pt_inr=1.0,
         )
         repeated_neutral = triage_pgx_actionability(
-            "Warfarin", [], platelets_abnormal=False, pt_inr_abnormal=False,
+            "Warfarin", [], platelets=250.0, pt_inr=1.0,
         )
         assert repeated_high["triage"] == high_priority_profile_triage["triage"] == TRIAGE_HIGH
         assert repeated_neutral["triage"] == neutral_profile_triage["triage"] == TRIAGE_CONSIDER

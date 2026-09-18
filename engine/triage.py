@@ -35,11 +35,12 @@ and related guidance), independent of any single patient:
 
 `Patient-Specific Clinical Context` is a boolean state describing whether a
 condition specific to *this drug's own* metabolic or pharmacodynamic
-pathway is present for *this* patient. Every lab input into this state is
-itself a three-valued flag -- True (abnormal), False (normal), or None
-(missing data) -- produced upstream by engine.clinical's Layer 1 state
-functions; this module never receives or evaluates a raw numeric lab
-reading.
+pathway is present for *this* patient. Every lab input into this state is a
+raw numeric reading (or `None` for missing data) that this module passes
+directly into engine.clinical's `assess_*` functions, which evaluate it
+against a named conditional threshold to resolve a three-valued
+Abnormal/Normal/Unknown status; this module itself never performs the
+threshold comparison, it only reads the resolved status string back.
 
     CONTEXT_NEUTRAL              -- no pathway-specific abnormal state is
                                      flagged.
@@ -276,10 +277,10 @@ def _clopidogrel_triage(concurrent_medications, high_baseline_adr_risk=False):
     }
 
 
-def _tacrolimus_triage(concurrent_medications, egfr_abnormal=None, alt_ast_abnormal=None, high_baseline_adr_risk=False):
+def _tacrolimus_triage(concurrent_medications, egfr=None, alt_ast=None, high_baseline_adr_risk=False):
     ddi_findings = check_drug_interactions("tacrolimus", concurrent_medications)
-    renal = assess_renal_function(egfr_abnormal)
-    hepatic = assess_hepatic_function(alt_ast_abnormal)
+    renal = assess_renal_function(egfr)
+    hepatic = assess_hepatic_function(alt_ast)
 
     actionability = ACTIONABILITY_VALIDATED_HIGH
     pathway_intersecting = bool(ddi_findings) or renal["renal_function_status"] == "REDUCED" or hepatic["transaminase_status"] == "ELEVATED"
@@ -321,9 +322,9 @@ def _tacrolimus_triage(concurrent_medications, egfr_abnormal=None, alt_ast_abnor
     }
 
 
-def _warfarin_triage(concurrent_medications, platelets_abnormal=None, pt_inr_abnormal=None, high_baseline_adr_risk=False):
+def _warfarin_triage(concurrent_medications, platelets=None, pt_inr=None, high_baseline_adr_risk=False):
     ddi_findings = check_drug_interactions("warfarin", concurrent_medications)
-    coagulation = assess_bleeding_risk_labs(platelets_abnormal, pt_inr_abnormal)
+    coagulation = assess_bleeding_risk_labs(platelets, pt_inr)
 
     severe_ddi = any(finding["severity"] == "MAJOR" for finding in ddi_findings)
     abnormal_coagulation = coagulation["coagulation_cbc_status"] == "ABNORMAL"
@@ -381,24 +382,26 @@ def triage_pgx_actionability(
     *,
     age: float = None,
     weight: float = None,
-    egfr_abnormal: bool = None,
-    alt_ast_abnormal: bool = None,
-    platelets_abnormal: bool = None,
-    pt_inr_abnormal: bool = None,
+    egfr: float = None,
+    alt_ast: float = None,
+    platelets: float = None,
+    pt_inr: float = None,
     high_baseline_adr_risk: bool = False,
 ) -> dict:
     """Pre-test triage: should a PGx test even be ordered for this drug?
 
     Implements Testing Priority = f(PGx Actionability, Patient-Specific
     Clinical Context) -- see the module docstring for the full decision-
-    matrix definition. Every clinical-context lab parameter is a strict
-    three-valued flag produced upstream by engine.clinical's Layer 1 state
-    functions: `egfr_abnormal`, `alt_ast_abnormal`, `platelets_abnormal`,
-    `pt_inr_abnormal` are each `True` (abnormal), `False` (normal), or
-    `None` (missing data) -- never a raw numeric reading. `age` (years) and
-    `weight` (kg) remain objective numeric inputs used only for the
-    pediatric/low-weight dosing context, unrelated to the lab-abnormality
-    state machine. `high_baseline_adr_risk` is the single boolean verdict
+    matrix definition. Every clinical-context lab parameter (`egfr`,
+    `alt_ast`, `platelets`, `pt_inr`, each in its stated unit, or `None`
+    for missing data) is a raw numeric reading, passed straight into
+    engine.clinical's `assess_*` functions, which evaluate it against a
+    named conditional threshold; this function never performs that
+    comparison itself, it only reads back the resolved Abnormal/Normal/
+    Unknown status. `age` (years) and `weight` (kg) remain objective
+    numeric inputs used only for the pediatric/low-weight dosing context,
+    unrelated to the lab-abnormality state machine. `high_baseline_adr_risk`
+    is the single boolean verdict
     already computed by Layer 2's engine.clinical.calculate_adr_risk() --
     this function never receives or reasons about the raw subjective
     predictor checkboxes behind it, and that covariate never transitions
@@ -432,12 +435,12 @@ def triage_pgx_actionability(
         result = _clopidogrel_triage(concurrent_medications, high_baseline_adr_risk=high_baseline_adr_risk)
     elif drug_key == "tacrolimus":
         result = _tacrolimus_triage(
-            concurrent_medications, egfr_abnormal=egfr_abnormal, alt_ast_abnormal=alt_ast_abnormal,
+            concurrent_medications, egfr=egfr, alt_ast=alt_ast,
             high_baseline_adr_risk=high_baseline_adr_risk,
         )
     elif drug_key == "warfarin":
         result = _warfarin_triage(
-            concurrent_medications, platelets_abnormal=platelets_abnormal, pt_inr_abnormal=pt_inr_abnormal,
+            concurrent_medications, platelets=platelets, pt_inr=pt_inr,
             high_baseline_adr_risk=high_baseline_adr_risk,
         )
     else:

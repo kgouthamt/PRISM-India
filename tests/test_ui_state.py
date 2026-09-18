@@ -3,9 +3,9 @@
 Streamlit's own widget rendering is verified separately via a live
 Playwright pass (see the project's manual verification notes); this suite
 instead pins down the pure state -- the module-level constants and pure
-functions app.py wires its widgets to -- so that a state-routing exception
-(ImportError, NameError, KeyError, or an unexpected value escaping its
-declared state space) is caught by `pytest`, not discovered live.
+functions app.py wires its widgets to -- so that a type-casting exception
+(ValueError, TypeError) or a state-routing exception (ImportError,
+NameError, KeyError) is caught by `pytest`, not discovered live.
 
 Run with:
     pytest tests/test_ui_state.py -v
@@ -19,12 +19,18 @@ import app
 from engine.clinical import (
     ADR_RISK_HIGH,
     ADR_RISK_STANDARD,
+    ALT_AST_THRESHOLD,
+    EGFR_THRESHOLD,
     ISOLATED_VERDICT_BASELINE,
     ISOLATED_VERDICT_HIGH,
-    assess_bleeding_risk_labs,
-    assess_hepatic_function,
-    assess_renal_function,
+    PLATELETS_THRESHOLD,
+    PT_INR_THRESHOLD,
     calculate_adr_risk,
+    is_alt_ast_abnormal,
+    is_egfr_abnormal,
+    is_platelets_abnormal,
+    is_pt_inr_abnormal,
+    parse_lab_value,
 )
 from engine.triage import (
     CPIC_TESTING_NOT_INDICATED,
@@ -47,47 +53,62 @@ def test_app_module_imports_without_exception():
     importlib.reload(app)
 
 
-class TestLayer1LabFlagStateSpace:
-    """Every Layer 1 lab parameter is a three-valued state -- Missing Data
-    (None), Normal (False), Abnormal (True) -- never a fourth value."""
+class TestLayer1NumericLabInputTypeCasting:
+    """Every Layer 1 lab parameter is ingested as raw text and type-cast
+    to a float via parse_lab_value() -- string-to-float conversion with
+    explicit exception handling, never a ValueError/TypeError escaping to
+    the caller."""
 
-    def test_lab_flag_options_are_exactly_the_three_named_states(self):
-        assert app._LAB_FLAG_OPTIONS == ["Missing Data", "Normal", "Abnormal"]
+    @pytest.mark.parametrize("token", ["", "   ", "none", "None", "NONE", "n/a", "N/A", "na", "NA"])
+    def test_missing_data_tokens_cast_to_none_without_raising(self, token):
+        value, error = parse_lab_value(token)
+        assert value is None
+        assert error is None
 
-    def test_lab_flag_state_maps_each_option_to_its_declared_value(self):
-        assert app._LAB_FLAG_STATE["Missing Data"] is None
-        assert app._LAB_FLAG_STATE["Normal"] is False
-        assert app._LAB_FLAG_STATE["Abnormal"] is True
+    def test_python_none_input_never_raises_type_error(self):
+        value, error = parse_lab_value(None)
+        assert value is None
+        assert error is None
 
-    def test_lab_flag_state_has_no_extra_or_missing_keys(self):
-        assert set(app._LAB_FLAG_STATE.keys()) == set(app._LAB_FLAG_OPTIONS)
+    @pytest.mark.parametrize("token", ["abc", "45mg/dL", "--", "1.2.3"])
+    def test_unparseable_garbage_never_raises_value_error(self, token):
+        value, error = parse_lab_value(token)
+        assert value is None
+        assert error is not None
 
-    @pytest.mark.parametrize("flag", [True, False, None])
-    def test_renal_state_transition_never_raises(self, flag):
-        result = assess_renal_function(flag)
-        assert result["renal_function_status"] in ("REDUCED", "NORMAL", "UNKNOWN")
+    @pytest.mark.parametrize("token,expected", [("45", 45.0), ("59.9", 59.9), ("-1.5", -1.5), ("0", 0.0)])
+    def test_valid_numeric_literals_cast_cleanly(self, token, expected):
+        value, error = parse_lab_value(token)
+        assert value == expected
+        assert error is None
 
-    @pytest.mark.parametrize("flag", [True, False, None])
-    def test_hepatic_state_transition_never_raises(self, flag):
-        result = assess_hepatic_function(flag)
-        assert result["transaminase_status"] in ("ELEVATED", "NORMAL", "UNKNOWN")
+    def test_egfr_exactly_at_threshold_is_not_abnormal(self):
+        # Boundary value: the conditional is strict less-than.
+        assert is_egfr_abnormal(EGFR_THRESHOLD) is False
+        assert is_egfr_abnormal(EGFR_THRESHOLD - 0.01) is True
 
-    @pytest.mark.parametrize("platelets_flag", [True, False, None])
-    @pytest.mark.parametrize("pt_inr_flag", [True, False, None])
-    def test_coagulation_state_transition_never_raises_for_any_combination(self, platelets_flag, pt_inr_flag):
-        result = assess_bleeding_risk_labs(platelets_flag, pt_inr_flag)
-        assert result["coagulation_cbc_status"] in ("ABNORMAL", "NORMAL", "UNKNOWN")
+    def test_alt_ast_exactly_at_threshold_is_not_abnormal(self):
+        # Boundary value: the conditional is strict greater-than.
+        assert is_alt_ast_abnormal(ALT_AST_THRESHOLD) is False
+        assert is_alt_ast_abnormal(ALT_AST_THRESHOLD + 0.01) is True
 
-    def test_abnormal_true_immediately_transitions_to_the_flagged_state(self):
-        # "ABNORMAL -> FLAG": True must never resolve to NORMAL or UNKNOWN.
-        assert assess_renal_function(True)["renal_function_status"] == "REDUCED"
-        assert assess_hepatic_function(True)["transaminase_status"] == "ELEVATED"
-        assert assess_bleeding_risk_labs(True, False)["coagulation_cbc_status"] == "ABNORMAL"
+    def test_platelets_exactly_at_threshold_is_not_abnormal(self):
+        assert is_platelets_abnormal(PLATELETS_THRESHOLD) is False
+        assert is_platelets_abnormal(PLATELETS_THRESHOLD - 0.01) is True
 
-    def test_missing_data_never_flags_as_abnormal(self):
-        assert assess_renal_function(None)["renal_function_status"] == "UNKNOWN"
-        assert assess_hepatic_function(None)["transaminase_status"] == "UNKNOWN"
-        assert assess_bleeding_risk_labs(None, None)["coagulation_cbc_status"] == "UNKNOWN"
+    def test_pt_inr_exactly_at_threshold_is_not_abnormal(self):
+        assert is_pt_inr_abnormal(PT_INR_THRESHOLD) is False
+        assert is_pt_inr_abnormal(PT_INR_THRESHOLD + 0.01) is True
+
+    @pytest.mark.parametrize("predicate", [is_egfr_abnormal, is_alt_ast_abnormal, is_platelets_abnormal, is_pt_inr_abnormal])
+    def test_none_never_satisfies_any_conditional_threshold(self, predicate):
+        assert predicate(None) is False
+
+    def test_app_exposes_the_numeric_input_helper_not_the_old_flag_helper(self):
+        assert hasattr(app, "_lab_numeric_input")
+        assert not hasattr(app, "_lab_flag_input")
+        assert not hasattr(app, "_LAB_FLAG_OPTIONS")
+        assert not hasattr(app, "_LAB_FLAG_STATE")
 
 
 class TestLayer2IsolatedExecutionContexts:
@@ -119,22 +140,23 @@ class TestLayer2IsolatedExecutionContexts:
         assert result["gerontonet_isolated_verdict"] == ISOLATED_VERDICT_BASELINE
 
 
-class TestLayer2WebSearchModule:
-    """A single dropdown selects exactly one of three independent query
-    variables; only the selected query's own boolean input is read."""
+class TestLayer2FreeTextSearchModule:
+    """The Web Search module ingests an opaque free-text query -- no
+    predefined dropdown vocabulary -- and never parses the submitted text
+    against a fixed token set."""
 
-    def test_query_options_are_exactly_the_three_named_dimensions(self):
-        assert app._WEB_SEARCH_QUERY_OPTIONS == ["ADR RISK", "FAMILY RISK", "ALLERGIC RISK"]
+    def test_web_search_mockup_takes_a_single_context_flag(self):
+        import inspect
+        sig = inspect.signature(app._web_search_mockup)
+        assert list(sig.parameters) == ["high_risk_context"]
 
-    def test_query_key_maps_every_option_to_a_mock_case_report_url(self):
-        for option in app._WEB_SEARCH_QUERY_OPTIONS:
-            label = app._WEB_SEARCH_QUERY_KEY[option]
-            assert label in app._MOCK_CASE_REPORT_QUERIES
-            assert app._MOCK_CASE_REPORT_QUERIES[label].startswith("https://")
+    def test_dropdown_constants_no_longer_exist(self):
+        assert not hasattr(app, "_WEB_SEARCH_QUERY_OPTIONS")
+        assert not hasattr(app, "_WEB_SEARCH_QUERY_KEY")
+        assert not hasattr(app, "_MOCK_CASE_REPORT_QUERIES")
 
-    def test_no_orphaned_or_missing_query_mappings(self):
-        mapped_labels = set(app._WEB_SEARCH_QUERY_KEY.values())
-        assert mapped_labels == set(app._MOCK_CASE_REPORT_QUERIES.keys())
+    def test_urllib_parse_is_imported_for_query_encoding(self):
+        assert hasattr(app, "urllib")
 
 
 class TestLayer3GenotypingRoutingState:
@@ -182,18 +204,18 @@ class TestLayer3GenomeIndiaDecoupling:
 
     def test_ethnicity_never_changes_triage_state_for_any_drug(self):
         for drug in ("Clopidogrel", "Tacrolimus", "Warfarin"):
-            baseline = triage_pgx_actionability(drug, platelets_abnormal=False, pt_inr_abnormal=False)["triage"]
+            baseline = triage_pgx_actionability(drug, platelets=250.0, pt_inr=1.0)["triage"]
             for ethnicity in ETHNICITY_OPTIONS:
                 genomeindia_population_priority(ethnicity)
-                repeated = triage_pgx_actionability(drug, platelets_abnormal=False, pt_inr_abnormal=False)["triage"]
+                repeated = triage_pgx_actionability(drug, platelets=250.0, pt_inr=1.0)["triage"]
                 assert repeated == baseline
 
 
 class TestFullLayerPipelineMissingDataHandling:
-    """A fully blank clinician submission -- every Layer 1 flag Missing
-    Data, no Layer 2 predictors, Genotyping Results Not Available -- must
-    resolve through all three layers without raising, landing on the safe
-    routine-monitoring default."""
+    """A fully blank clinician submission -- every Layer 1 field empty
+    (parsing to None), no Layer 2 predictors, Genotyping Results Not
+    Available -- must resolve through all three layers without raising,
+    landing on the safe routine-monitoring default."""
 
     def test_blank_submission_never_raises_across_every_mvp_drug(self):
         adr = calculate_adr_risk()
@@ -203,8 +225,8 @@ class TestFullLayerPipelineMissingDataHandling:
         for drug in ("Clopidogrel", "Tacrolimus", "Warfarin"):
             triage = triage_pgx_actionability(
                 drug, None, age=None, weight=None,
-                egfr_abnormal=None, alt_ast_abnormal=None,
-                platelets_abnormal=None, pt_inr_abnormal=None,
+                egfr=None, alt_ast=None,
+                platelets=None, pt_inr=None,
                 high_baseline_adr_risk=adr["high_baseline_adr_risk"],
             )
             assert "triage" in triage
@@ -215,11 +237,28 @@ class TestFullLayerPipelineMissingDataHandling:
             genomeindia = genomeindia_population_priority(ethnicity)
             assert "genomeindia_priority" in genomeindia
 
+    def test_blank_text_fields_end_to_end_through_parse_lab_value(self):
+        # Exercises the exact ingestion path app.py's _lab_numeric_input
+        # uses: raw text -> parse_lab_value -> triage_pgx_actionability.
+        egfr, egfr_error = parse_lab_value("")
+        alt_ast, alt_ast_error = parse_lab_value("N/A")
+        platelets, platelets_error = parse_lab_value("none")
+        pt_inr, pt_inr_error = parse_lab_value("  ")
+        assert (egfr, alt_ast, platelets, pt_inr) == (None, None, None, None)
+        assert (egfr_error, alt_ast_error, platelets_error, pt_inr_error) == (None, None, None, None)
+
+        triage = triage_pgx_actionability(
+            "Warfarin", None, age=None, weight=None,
+            egfr=egfr, alt_ast=alt_ast, platelets=platelets, pt_inr=pt_inr,
+        )
+        assert triage["triage"] == TRIAGE_CONSIDER
+        assert triage["cpic_testing_recommendation"] == CPIC_TESTING_RECOMMENDED
+
     def test_warfarin_blank_submission_lands_on_consider_not_high_or_low(self):
         triage = triage_pgx_actionability(
             "Warfarin", None, age=None, weight=None,
-            egfr_abnormal=None, alt_ast_abnormal=None,
-            platelets_abnormal=None, pt_inr_abnormal=None,
+            egfr=None, alt_ast=None,
+            platelets=None, pt_inr=None,
         )
         assert triage["triage"] == TRIAGE_CONSIDER
         assert triage["cpic_testing_recommendation"] == CPIC_TESTING_RECOMMENDED
@@ -232,14 +271,29 @@ class TestFullLayerPipelineMissingDataHandling:
         )
         assert adr["high_baseline_adr_risk"] is True
 
+        # Raw numeric readings entered as text and type-cast by
+        # parse_lab_value(), exactly as app.py's Layer 1 inputs would.
+        egfr, _ = parse_lab_value("30")
+        alt_ast, _ = parse_lab_value("60")
         triage = triage_pgx_actionability(
             "Tacrolimus", ["Fluconazole"], age=85, weight=55.0,
-            egfr_abnormal=True, alt_ast_abnormal=True,
+            egfr=egfr, alt_ast=alt_ast,
             high_baseline_adr_risk=adr["high_baseline_adr_risk"],
         )
         assert triage["triage"] == TRIAGE_HIGH
         assert triage["cpic_testing_recommendation"] == CPIC_TESTING_REQUIRED
         assert len(triage["warnings"]) >= 2
+
+    def test_garbage_text_input_degrades_to_missing_data_not_a_crash(self):
+        # A clinician typing garbage into a numeric field must never crash
+        # the triage pipeline -- parse_lab_value degrades it to None (an
+        # error message is surfaced separately by the UI layer).
+        value, error = parse_lab_value("not a number")
+        assert value is None
+        assert error is not None
+
+        triage = triage_pgx_actionability("Warfarin", None, egfr=value, alt_ast=value)
+        assert triage["triage"] == TRIAGE_CONSIDER
 
 
 if __name__ == "__main__":
