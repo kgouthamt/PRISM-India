@@ -41,10 +41,38 @@ footer {visibility: hidden;}
 
 .block-container {padding-top: 2rem; padding-bottom: 3rem; max-width: 1200px;}
 
+/* Component-tree card shell: every top-level st.container(border=True) --
+   one per Layer -- is styled here as a single reusable "card" DOM node,
+   so each Layer reads as a distinct panel rather than free-floating
+   elements on the page background. */
+div[data-testid="stVerticalBlockBorderWrapper"], .card {
+    border-radius: 12px !important;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+    background: #ffffff;
+}
 div[data-testid="stVerticalBlockBorderWrapper"] {
-    border-radius: 10px !important;
-    border: 1px solid rgba(0, 0, 0, 0.08);
-    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.05);
+    padding: 4px 6px;
+}
+
+.card {
+    padding: 18px 22px;
+    margin: 10px 0 16px 0;
+}
+
+/* Small uppercase section tag rendered above each Layer's h2 header --
+   a clinical-dashboard convention for grouping a panel's identity. */
+.layer-kicker {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #1a56b0;
+    background: #e8f0fe;
+    padding: 3px 10px;
+    border-radius: 999px;
+    margin-bottom: 4px;
 }
 
 div[data-testid="stMetric"] {
@@ -56,6 +84,61 @@ div[data-testid="stMetric"] {
 
 section[data-testid="stSidebar"] {
     border-right: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+/* Segmented-control styling for the Layer 1 lab-flag radios: Streamlit's
+   default stacked/inline radio DOM restyled to read as a clinical
+   checklist toggle rather than a generic form control. */
+div[role="radiogroup"] {
+    gap: 4px;
+}
+div[role="radiogroup"] label {
+    border: 1px solid rgba(15, 23, 42, 0.14);
+    border-radius: 8px;
+    padding: 4px 12px;
+    margin-right: 4px;
+    background: rgba(127, 127, 127, 0.04);
+}
+
+/* Inline HTML badge for an ABNORMAL -> FLAG state transition, placed
+   directly beside its lab parameter rather than as a full-width alert. */
+.flag-badge {
+    display: inline-block;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    color: #ffffff;
+    background: #b3261e;
+    padding: 3px 12px;
+    border-radius: 999px;
+    margin-top: 6px;
+}
+.flag-badge-normal {
+    background: #1e7b34;
+}
+.flag-badge-unknown {
+    background: #6b7280;
+}
+
+/* Risk-verdict tag: the Layer 2 isolated-verdict output, restyled from a
+   full-width banner into a compact, bold status tag. */
+.risk-tag {
+    display: inline-block;
+    font-size: 0.95rem;
+    font-weight: 700;
+    padding: 6px 16px;
+    border-radius: 999px;
+    margin-top: 4px;
+}
+.risk-tag-high {background: #fdecea; color: #b3261e; border: 1px solid #f3c6c2;}
+.risk-tag-standard {background: #e6f4ea; color: #1e7b34; border: 1px solid #c3e6cd;}
+
+/* Prominent red-bordered emphasis for the mandatory Override
+   justification field -- targets the underlying <textarea>'s aria-label,
+   which Streamlit derives directly from the widget's own label text. */
+textarea[aria-label="Clinical Justification for Override"] {
+    border: 2px solid #b3261e !important;
+    background: #fdecea !important;
 }
 
 .pgx-card {
@@ -207,11 +290,24 @@ def _lab_flag_input(label: str, key: str):
     transitions this parameter's backend state to ABNORMAL -> FLAG the
     instant the widget resolves; there is no intermediate numeric
     comparison anywhere downstream of this function.
+
+    Rendering only: the segmented-control radio and its resulting state
+    are placed in a two-column sub-tree so the flag badge sits inline,
+    beside its own parameter, instead of interrupting the page as a
+    full-width alert block.
     """
-    choice = st.radio(label, _LAB_FLAG_OPTIONS, horizontal=True, key=key)
+    control_col, badge_col = st.columns([3, 1])
+    with control_col:
+        choice = st.radio(label, _LAB_FLAG_OPTIONS, horizontal=True, key=key)
     flag = _LAB_FLAG_STATE[choice]
-    if flag is True:
-        st.error(f"ABNORMAL → FLAG: {label}")
+    with badge_col:
+        st.markdown("<div style='height: 1.9rem'></div>", unsafe_allow_html=True)
+        if flag is True:
+            st.markdown("<span class='flag-badge'>ABNORMAL → FLAG</span>", unsafe_allow_html=True)
+        elif flag is False:
+            st.markdown("<span class='flag-badge flag-badge-normal'>NORMAL</span>", unsafe_allow_html=True)
+        else:
+            st.markdown("<span class='flag-badge flag-badge-unknown'>MISSING</span>", unsafe_allow_html=True)
     return flag
 
 
@@ -397,6 +493,7 @@ def _log_and_export(clinician_decision: str, override_reason: str = None) -> Non
 
 
 with tab1:
+    st.markdown("<span class='layer-kicker'>Patient Intake</span>", unsafe_allow_html=True)
     st.header("Layer 1: Clinical Details")
     with st.container(border=True):
         st.markdown("**Demographics**")
@@ -460,6 +557,7 @@ with tab1:
 
     st.session_state["patient_age"] = age
 
+    st.markdown("<span class='layer-kicker'>Risk Prediction</span>", unsafe_allow_html=True)
     st.header("Layer 2: ADR Risk Prediction")
     with st.container(border=True):
         st.caption(
@@ -555,23 +653,31 @@ with tab1:
         adatip_high = adr_result["adatip_isolated_verdict"] == "High Risk"
         gerontonet_high = adr_result["gerontonet_isolated_verdict"] == "High Risk"
         with verdict_col1:
-            banner_class = "adr-banner-high" if adatip_high else "adr-banner-standard"
+            tag_class = "risk-tag-high" if adatip_high else "risk-tag-standard"
+            st.markdown("ADR in acute vulnerable patient:", help=None)
             st.markdown(
-                f"<div class='adr-banner {banner_class}'>ADR in acute vulnerable patient: "
-                f"{html.escape(adr_result['adatip_isolated_verdict'])}</div>",
+                f"<span class='risk-tag {tag_class}'>{html.escape(adr_result['adatip_isolated_verdict'])}</span>",
                 unsafe_allow_html=True,
             )
         with verdict_col2:
-            banner_class = "adr-banner-high" if gerontonet_high else "adr-banner-standard"
+            tag_class = "risk-tag-high" if gerontonet_high else "risk-tag-standard"
+            st.markdown("ADR in chronic fragility:", help=None)
             st.markdown(
-                f"<div class='adr-banner {banner_class}'>ADR in chronic fragility: "
-                f"{html.escape(adr_result['gerontonet_isolated_verdict'])}</div>",
+                f"<span class='risk-tag {tag_class}'>{html.escape(adr_result['gerontonet_isolated_verdict'])}</span>",
                 unsafe_allow_html=True,
             )
 
-        st.markdown("")
+    # Rendering placement only: the Web Search module is relocated out of
+    # the primary Layer 2 component subtree and into the sidebar, so it
+    # reads as an auxiliary reference panel a clinician can consult without
+    # it interrupting the main clinical form's top-to-bottom flow. Its own
+    # inputs (adatip_high, allergy_history, family_history) and internal
+    # logic are unchanged from the Layer 2 computation above.
+    with st.sidebar:
+        st.markdown("---")
         _web_search_mockup(adatip_high, allergy_history, family_history)
 
+    st.markdown("<span class='layer-kicker'>Testing Pathway</span>", unsafe_allow_html=True)
     st.header("Layer 3: Pharmacogenomics")
     with st.container(border=True):
         col_drug, col_meds = st.columns(2)
@@ -591,11 +697,23 @@ with tab1:
             "comprehensive interaction checker."
         )
 
+        # Progressive disclosure: index=None renders the toggle with no
+        # default selection, so neither the CPIC allele pathway subtree
+        # (Path A) nor the Testing-Priority triage subtree (Path B) mounts
+        # into the component tree until the clinician actively picks one --
+        # the initial screen stays uncluttered rather than defaulting into
+        # Path A's form on first render.
         genotyping_available = st.radio(
-            "Genotyping Results:", GENOTYPING_AVAILABILITY_OPTIONS, horizontal=True
+            "Genotyping Results:", GENOTYPING_AVAILABILITY_OPTIONS,
+            index=None, horizontal=True, key="genotyping_available",
         )
 
-    if genotyping_available == "Available":
+    if genotyping_available is None:
+        st.info(
+            "Select Available or Not Available above to reveal the "
+            "corresponding pathway."
+        )
+    elif genotyping_available == "Available":
         # Path A: a PGx result already exists -- go straight to the
         # standard CPIC allele pathway lookup.
         with st.container(border=True):
@@ -778,9 +896,23 @@ with tab1:
             )
             ethnicity = st.selectbox("Ethnicity", ETHNICITY_OPTIONS, key="ethnicity_select")
             genomeindia_result = genomeindia_population_priority(ethnicity)
-            st.metric("GenomeIndia Population Priority", genomeindia_result["genomeindia_priority"])
             st.session_state["genomeindia_result"] = genomeindia_result
-            st.warning(
+
+            # Rendering only: the priority string's own value selects which
+            # of Streamlit's three built-in alert-box severities frames it
+            # -- st.error/st.warning/st.info carry no logic of their own,
+            # they only reflect the value genomeindia_population_priority()
+            # already resolved.
+            priority_value = genomeindia_result["genomeindia_priority"]
+            priority_message = f"GenomeIndia Population Priority: **{priority_value}**"
+            if priority_value == "High Priority":
+                st.error(priority_message)
+            elif priority_value == "Medium Priority":
+                st.warning(priority_message)
+            else:
+                st.info(priority_message)
+
+            st.caption(
                 "Population-level frequencies act as an isolated, "
                 "independent contextual signal; they cannot determine an "
                 "individual's genotype, do not replace clinical prescribing "
@@ -791,56 +923,64 @@ with tab1:
     if genotyping_available == "Available":
         st.session_state["genomeindia_result"] = None
 
+    st.markdown("<span class='layer-kicker'>Decision & Audit Trail</span>", unsafe_allow_html=True)
     st.header("Reporting and Audit")
     with st.container(border=True):
-        st.caption(
-            "An integrated summary of Layer 1, Layer 2, and Layer 3 "
-            "outputs. Per the CRITICAL DECOUPLING constraint in Layer 3, "
-            "the GenomeIndia population-context output (when present) is "
-            "reported below without being merged into any other value."
-        )
-
-        st.markdown("**Layer 1 — Clinical Details (Laboratory Flags)**")
-        lab_flag_summary = {
-            "eGFR (Renal Function)": egfr_abnormal,
-            "ALT/AST (Hepatic Function)": alt_ast_abnormal,
-            "Platelets (Coagulation/CBC)": platelets_abnormal,
-            "PT/INR (Coagulation/CBC)": pt_inr_abnormal,
-        }
-        for label, flag in lab_flag_summary.items():
-            state = "ABNORMAL → FLAG" if flag is True else ("Normal" if flag is False else "Missing Data")
-            st.markdown(f"- {label}: **{state}**")
-
-        st.markdown("**Layer 2 — ADR Risk Prediction (Isolated Verdicts)**")
-        st.markdown(f"- ADR in acute vulnerable patient: **{adr_result['adatip_isolated_verdict']}**")
-        st.markdown(f"- ADR in chronic fragility: **{adr_result['gerontonet_isolated_verdict']}**")
-
-        st.markdown("**Layer 3 — Pharmacogenomics**")
-        report_result = st.session_state.get("result")
-        report_triage_result = st.session_state.get("triage_result")
-        report_genomeindia_result = st.session_state.get("genomeindia_result")
-
-        if genotyping_available == "Available" and report_result:
-            st.markdown(f"- CPIC Allele Pathway Outcome: **{report_result['risk']}**")
-            st.markdown(
-                f"- Recommendation & Dosage: "
-                f"{report_result.get('recommendation_and_dosage') or report_result.get('reason')}"
+        # Rendering only: the read-only integrated summary is mounted
+        # inside its own st.expander subtree (expanded by default), which
+        # visually separates "what the three layers currently report" from
+        # the persistently visible Accept/Override action row below it --
+        # the report can be collapsed without hiding the actions that act
+        # on it.
+        with st.expander("View Integrated Clinical Report", expanded=True):
+            st.caption(
+                "An integrated summary of Layer 1, Layer 2, and Layer 3 "
+                "outputs. Per the CRITICAL DECOUPLING constraint in Layer 3, "
+                "the GenomeIndia population-context output (when present) is "
+                "reported below without being merged into any other value."
             )
-        elif genotyping_available == "Not Available" and report_triage_result:
-            st.markdown(f"- Testing Priority: **{report_triage_result['triage']}**")
-            st.markdown(
-                f"- CPIC Pre-Test Recommendation: "
-                f"**{report_triage_result['cpic_testing_recommendation']}**"
-            )
-        else:
-            st.info("Complete Layer 3 above (Evaluate or Run Triage) to populate this report.")
 
-        if report_genomeindia_result:
-            st.markdown(
-                f"- GenomeIndia Population Priority (isolated, decoupled): "
-                f"**{report_genomeindia_result['genomeindia_priority']}** "
-                f"(ethnicity: {report_genomeindia_result['ethnicity']})"
-            )
+            st.markdown("**Layer 1 — Clinical Details (Laboratory Flags)**")
+            lab_flag_summary = {
+                "eGFR (Renal Function)": egfr_abnormal,
+                "ALT/AST (Hepatic Function)": alt_ast_abnormal,
+                "Platelets (Coagulation/CBC)": platelets_abnormal,
+                "PT/INR (Coagulation/CBC)": pt_inr_abnormal,
+            }
+            for label, flag in lab_flag_summary.items():
+                state = "ABNORMAL → FLAG" if flag is True else ("Normal" if flag is False else "Missing Data")
+                st.markdown(f"- {label}: **{state}**")
+
+            st.markdown("**Layer 2 — ADR Risk Prediction (Isolated Verdicts)**")
+            st.markdown(f"- ADR in acute vulnerable patient: **{adr_result['adatip_isolated_verdict']}**")
+            st.markdown(f"- ADR in chronic fragility: **{adr_result['gerontonet_isolated_verdict']}**")
+
+            st.markdown("**Layer 3 — Pharmacogenomics**")
+            report_result = st.session_state.get("result")
+            report_triage_result = st.session_state.get("triage_result")
+            report_genomeindia_result = st.session_state.get("genomeindia_result")
+
+            if genotyping_available == "Available" and report_result:
+                st.markdown(f"- CPIC Allele Pathway Outcome: **{report_result['risk']}**")
+                st.markdown(
+                    f"- Recommendation & Dosage: "
+                    f"{report_result.get('recommendation_and_dosage') or report_result.get('reason')}"
+                )
+            elif genotyping_available == "Not Available" and report_triage_result:
+                st.markdown(f"- Testing Priority: **{report_triage_result['triage']}**")
+                st.markdown(
+                    f"- CPIC Pre-Test Recommendation: "
+                    f"**{report_triage_result['cpic_testing_recommendation']}**"
+                )
+            else:
+                st.info("Complete Layer 3 above (Evaluate or Run Triage) to populate this report.")
+
+            if report_genomeindia_result:
+                st.markdown(
+                    f"- GenomeIndia Population Priority (isolated, decoupled): "
+                    f"**{report_genomeindia_result['genomeindia_priority']}** "
+                    f"(ethnicity: {report_genomeindia_result['ethnicity']})"
+                )
 
         st.markdown("---")
         report_ready = bool(report_result or report_triage_result)
@@ -856,9 +996,15 @@ with tab1:
                     st.session_state["show_report_override"] = True
 
             if st.session_state.get("show_report_override"):
-                justification = st.text_area(
-                    "Clinical Justification for Override", key="report_override_reason"
-                )
+                with st.container(border=True):
+                    st.error(
+                        "⚠ Override selected -- a documented clinical "
+                        "justification is mandatory before this decision "
+                        "can be logged."
+                    )
+                    justification = st.text_area(
+                        "Clinical Justification for Override", key="report_override_reason"
+                    )
                 if st.button("Submit Override", key="report_submit_override"):
                     if justification.strip():
                         _log_and_export("OVERRIDDEN", justification.strip())
