@@ -152,21 +152,19 @@ GENOMEINDIA_PRIORITY_MEDIUM = "Medium Priority"
 GENOMEINDIA_PRIORITY_LOW = "Low Priority"
 
 ETHNICITY_OPTIONS = [
-    "North Indian (Indo-Aryan)",
-    "South Indian (Dravidian)",
-    "East Indian",
-    "North East Indian",
-    "West Indian",
-    "Other / Unspecified",
+    "Indo-Aryan",
+    "Dravidian",
+    "Tibeto-Burman",
+    "Austroasiatic",
+    "Other / Unknown",
 ]
 
 GENOMEINDIA_ETHNICITY_PRIORS = {
-    "North Indian (Indo-Aryan)": GENOMEINDIA_PRIORITY_HIGH,
-    "South Indian (Dravidian)": GENOMEINDIA_PRIORITY_MEDIUM,
-    "East Indian": GENOMEINDIA_PRIORITY_MEDIUM,
-    "North East Indian": GENOMEINDIA_PRIORITY_LOW,
-    "West Indian": GENOMEINDIA_PRIORITY_MEDIUM,
-    "Other / Unspecified": GENOMEINDIA_PRIORITY_LOW,
+    "Indo-Aryan": GENOMEINDIA_PRIORITY_HIGH,
+    "Dravidian": GENOMEINDIA_PRIORITY_MEDIUM,
+    "Tibeto-Burman": GENOMEINDIA_PRIORITY_MEDIUM,
+    "Austroasiatic": GENOMEINDIA_PRIORITY_LOW,
+    "Other / Unknown": GENOMEINDIA_PRIORITY_LOW,
 }
 
 
