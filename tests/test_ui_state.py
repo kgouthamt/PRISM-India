@@ -12,6 +12,8 @@ Run with:
 """
 
 import importlib
+import inspect
+import pathlib
 
 import pytest
 
@@ -21,11 +23,13 @@ from engine.clinical import (
     ADR_RISK_STANDARD,
     ALT_AST_THRESHOLD,
     EGFR_THRESHOLD,
+    GERONTONET_PREVIOUS_ADR_POINTS,
     ISOLATED_VERDICT_BASELINE,
     ISOLATED_VERDICT_HIGH,
     PLATELETS_THRESHOLD,
     PT_INR_THRESHOLD,
     calculate_adr_risk,
+    calculate_gerontonet_score,
     is_alt_ast_abnormal,
     is_egfr_abnormal,
     is_platelets_abnormal,
@@ -51,6 +55,116 @@ def test_app_module_imports_without_exception():
     or other exception escaping module initialization.
     """
     importlib.reload(app)
+
+
+_APP_SOURCE = pathlib.Path(app.__file__).read_text()
+
+
+class TestLayer2PatientConditionSelectorRemoved:
+    """The Patient Condition meta-selector (Acute Vulnerability / Chronic
+    Fragility) is removed: ADATIP and GerontoNet operate directly on their
+    own underlying clinical-data state variables, with no top-level
+    conditional-rendering gate above them."""
+
+    def test_patient_condition_selector_text_is_gone_from_the_source(self):
+        assert "Patient Condition" not in _APP_SOURCE
+        assert "Acute Vulnerability" not in _APP_SOURCE
+        assert "Chronic Fragility" not in _APP_SOURCE
+
+    def test_removing_the_selector_does_not_change_either_isolated_verdict(self):
+        # The selector never gated the computation to begin with (see the
+        # prior commit's own isolated-execution-context guarantee); its
+        # removal must leave both verdicts' state transitions unaffected.
+        result = calculate_adr_risk(chronic_lung_disease=True, diuretics=True)
+        assert result["adatip_isolated_verdict"] == ISOLATED_VERDICT_HIGH
+        assert result["gerontonet_isolated_verdict"] == ISOLATED_VERDICT_BASELINE
+
+
+class TestGerontoNetAdrHistoryIntegration:
+    """previous_adr_history is an explicit boolean state variable grouped
+    with GerontoNet's other scoring inputs, contributing the model's own
+    +2 statistical weight when True."""
+
+    def test_previous_adr_history_contributes_the_standard_two_point_weight(self):
+        result = calculate_gerontonet_score(previous_adr_history=True)
+        assert result["breakdown"]["previous_adr_history"] == GERONTONET_PREVIOUS_ADR_POINTS
+        assert result["breakdown"]["previous_adr_history"] == 2
+
+    def test_previous_adr_history_false_contributes_zero(self):
+        result = calculate_gerontonet_score(previous_adr_history=False)
+        assert result["breakdown"]["previous_adr_history"] == 0
+
+    def test_calculate_adr_risk_forwards_the_boolean_into_gerontonet_scoring(self):
+        result = calculate_adr_risk(previous_adr_history=True)
+        assert result["gerontonet_score"]["breakdown"]["previous_adr_history"] == GERONTONET_PREVIOUS_ADR_POINTS
+
+    def test_ui_groups_the_checkbox_with_gerontonet_not_general_history(self):
+        # Regression guard for the UI-placement change: the checkbox's own
+        # label text (and the +2 weight it documents) must appear inside
+        # app.py's source, associated with the GerontoNet input block.
+        # The literal rendered section markers (not any docstring prose
+        # that happens to mention these section names) anchor the check.
+        assert "Previous ADR history" in _APP_SOURCE
+        gerontonet_block_start = _APP_SOURCE.index("**GerontoNet Risk Score (Isolated Context)**")
+        general_history_start = _APP_SOURCE.index("**General Clinical History**")
+        adr_history_checkbox_pos = _APP_SOURCE.index("Previous ADR history")
+        assert gerontonet_block_start < adr_history_checkbox_pos < general_history_start
+
+
+class TestLayer2WebSearchChatbotUI:
+    """The Web Search module renders as a conversational query surface
+    inside a collapsible container in the General Clinical History area,
+    not a static dropdown and not a sidebar panel."""
+
+    def test_dropdown_constants_no_longer_exist(self):
+        assert not hasattr(app, "_WEB_SEARCH_QUERY_OPTIONS")
+        assert not hasattr(app, "_WEB_SEARCH_QUERY_KEY")
+        assert not hasattr(app, "_MOCK_CASE_REPORT_QUERIES")
+
+    def test_web_search_mockup_takes_a_single_context_flag(self):
+        sig = inspect.signature(app._web_search_mockup)
+        assert list(sig.parameters) == ["high_risk_context"]
+
+    def test_web_search_uses_chat_message_components(self):
+        source = inspect.getsource(app._web_search_mockup)
+        assert "st.chat_message" in source
+        assert "st.expander" in source
+
+    def test_web_search_prompt_matches_the_requested_label(self):
+        source = inspect.getsource(app._web_search_mockup)
+        assert "Search literature for ADR, Family, or Allergic risks..." in source
+
+    def test_web_search_is_called_from_the_main_layer_2_flow_not_the_sidebar(self):
+        call_site_index = _APP_SOURCE.index("_web_search_mockup(allergy_history or family_history)")
+        # No enclosing "with st.sidebar:" block immediately precedes this
+        # call site (the prior sidebar relocation has been reversed).
+        preceding_source = _APP_SOURCE[:call_site_index]
+        last_sidebar_open = preceding_source.rfind("with st.sidebar:")
+        last_layer2_header = preceding_source.rfind("Layer 2: ADR Risk Prediction")
+        assert last_layer2_header > last_sidebar_open
+
+
+class TestLayer3GenomeIndiaTextCleanup:
+    """The GenomeIndia UI block renders only its header, the Ethnicity
+    dropdown, and the priority alert box -- the prior decoupling
+    explanation and disclaimer prose are removed from the rendered text."""
+
+    def test_subheader_no_longer_carries_the_parenthetical(self):
+        assert "Population Context: GenomeIndia (Isolated, Decoupled Module)" not in _APP_SOURCE
+        assert "Population Context: GenomeIndia" in _APP_SOURCE
+
+    def test_independent_variable_explanation_text_is_removed(self):
+        assert "This output is an independent variable" not in _APP_SOURCE
+
+    def test_population_level_frequencies_disclaimer_is_removed(self):
+        assert "Population-level frequencies act as an isolated" not in _APP_SOURCE
+
+    def test_ethnicity_dropdown_and_priority_lookup_still_function(self):
+        # The rendering cleanup must not touch the underlying decoupled
+        # computation itself.
+        for ethnicity in ETHNICITY_OPTIONS:
+            result = genomeindia_population_priority(ethnicity)
+            assert result["genomeindia_priority"] in ("High Priority", "Medium Priority", "Low Priority")
 
 
 class TestLayer1NumericLabInputTypeCasting:

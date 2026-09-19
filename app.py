@@ -367,39 +367,43 @@ def _alert_card(level: str, title: str, body_html: str) -> None:
 
 
 def _web_search_mockup(high_risk_context: bool) -> None:
-    """Layer 2's Web Search module: free-text query ingestion replacing
-    the previous closed-vocabulary dropdown. The submitted string is
-    opaque text, never parsed against or matched to a fixed token set --
-    it is stored verbatim in session state and echoed back inside a mock
-    conversational response, with a placeholder case-report link built
-    directly from that same text. No live search is executed server-side
-    by PRISM-AIIMS itself; the outbound link opens a real PubMed search
-    scoped to the clinician's own query text.
+    """General Clinical History's Web Search module: a conversational
+    query surface rendered inside a collapsible container, styled with
+    chat-message components rather than a static dropdown or a plain form
+    field. The submitted string is opaque text, never parsed against or
+    matched to a fixed token set -- it is stored verbatim in session state
+    and echoed back as a chat turn, with a placeholder case-report link
+    built directly from that same text. No live search is executed
+    server-side by PRISM-AIIMS itself; the outbound link opens a real
+    PubMed search scoped to the clinician's own query text.
     """
-    st.markdown("**Web Search — Related Case Reports (Prototype)**")
-    query_text = st.text_input(
-        "Query clinical literature or search similar case reports...",
-        key="web_search_query_text",
-        placeholder="e.g. elderly patient warfarin bleeding risk",
-    )
-    if st.button("Search", key="web_search_submit") and query_text.strip():
-        st.session_state["web_search_last_query"] = query_text.strip()
-
-    last_query = st.session_state.get("web_search_last_query")
-    if last_query:
-        case_count = 4 if high_risk_context else 2
-        url = f"https://pubmed.ncbi.nlm.nih.gov/?term={urllib.parse.quote_plus(last_query)}"
-        st.markdown(f"**You searched:** `{last_query}`")
-        st.markdown(
-            f"Simulated search complete — found {case_count} similar case "
-            f"report(s) for evidence relevant to this query. "
-            f"[Search PubMed for this query]({url})"
+    with st.expander("Web Search — Related Case Reports (Prototype)"):
+        query_text = st.text_input(
+            "Search literature for ADR, Family, or Allergic risks...",
+            key="web_search_query_text",
+            placeholder="e.g. elderly patient warfarin bleeding risk",
+            label_visibility="collapsed",
         )
-    st.caption(
-        "This preview's case count is generated locally for demonstration "
-        "purposes; PRISM-AIIMS performs no server-side literature search of "
-        "its own."
-    )
+        if st.button("Search", key="web_search_submit") and query_text.strip():
+            st.session_state["web_search_last_query"] = query_text.strip()
+
+        last_query = st.session_state.get("web_search_last_query")
+        if last_query:
+            with st.chat_message("user"):
+                st.markdown(last_query)
+            with st.chat_message("assistant"):
+                case_count = 4 if high_risk_context else 2
+                url = f"https://pubmed.ncbi.nlm.nih.gov/?term={urllib.parse.quote_plus(last_query)}"
+                st.markdown(
+                    f"Simulated search complete — found {case_count} similar "
+                    f"case report(s) for evidence relevant to this query. "
+                    f"[Search PubMed for this query]({url})"
+                )
+        st.caption(
+            "This preview's case count is generated locally for "
+            "demonstration purposes; PRISM-AIIMS performs no server-side "
+            "literature search of its own."
+        )
 
 
 def _similar_cases_sidebar_panel() -> None:
@@ -588,15 +592,6 @@ with tab1:
             "the same patient, each producing its own verdict below, with "
             "neither computation observing the other's internal state."
         )
-        patient_condition = st.selectbox(
-            "Patient Condition", ["Acute Vulnerability", "Chronic Fragility"],
-            key="patient_condition",
-            help="A descriptive label only -- it does not gate either "
-                 "isolated execution context below. Both ADATIP (acute "
-                 "vulnerability) and GerontoNet (chronic fragility) always "
-                 "compute and render their own independent verdict "
-                 "regardless of this selection.",
-        )
         adatip_col, gerontonet_col = st.columns(2)
         with adatip_col:
             with st.container(border=True):
@@ -620,8 +615,7 @@ with tab1:
             with st.container(border=True):
                 st.markdown("**GerontoNet Risk Score (Isolated Context)**")
                 st.caption(
-                    "History of ADR is captured under General Clinical History "
-                    "below. Scored using the actual validated GerontoNet point "
+                    "Scored using the actual validated GerontoNet point "
                     "weights, not a simple predictor count."
                 )
                 num_drugs = st.number_input(
@@ -631,15 +625,21 @@ with tab1:
                 liver_disease = st.checkbox("Liver disease")
                 gte4_comorbid_conditions = st.checkbox("≥ 4 comorbid conditions")
                 renal_failure = st.checkbox("Renal failure")
+                # Explicit boolean state input, grouped directly with
+                # GerontoNet's other scoring variables: previous_adr_history
+                # is the model's own +2 statistical weight (see
+                # GERONTONET_PREVIOUS_ADR_POINTS in engine.clinical), not a
+                # cross-referenced value defined elsewhere on the page.
+                previous_adr_history = st.checkbox("Previous ADR history (+2 GerontoNet weight)")
 
         st.markdown("**General Clinical History**")
-        hist_col1, hist_col2, hist_col3 = st.columns(3)
+        hist_col1, hist_col2 = st.columns(2)
         with hist_col1:
-            previous_adr_history = st.checkbox("Previous ADR history")
-        with hist_col2:
             allergy_history = st.checkbox("Allergy history")
-        with hist_col3:
+        with hist_col2:
             family_history = st.checkbox("Family history")
+
+        _web_search_mockup(allergy_history or family_history)
 
         adr_result = calculate_adr_risk(
             age=age,
@@ -688,14 +688,6 @@ with tab1:
                 f"<span class='risk-tag {tag_class}'>{html.escape(adr_result['gerontonet_isolated_verdict'])}</span>",
                 unsafe_allow_html=True,
             )
-
-    # Rendering placement only: the Web Search module is relocated out of
-    # the primary Layer 2 component subtree and into the sidebar, so it
-    # reads as an auxiliary reference panel a clinician can consult without
-    # it interrupting the main clinical form's top-to-bottom flow.
-    with st.sidebar:
-        st.markdown("---")
-        _web_search_mockup(adatip_high or allergy_history or family_history)
 
     st.markdown("<span class='layer-kicker'>Testing Pathway</span>", unsafe_allow_html=True)
     st.header("Layer 3: Pharmacogenomics")
@@ -905,15 +897,7 @@ with tab1:
                 )
 
         with st.container(border=True):
-            st.subheader("Population Context: GenomeIndia (Isolated, Decoupled Module)")
-            st.caption(
-                "This output is an independent variable: a function of "
-                "ethnicity alone. It is never integrated, multiplied, or "
-                "combined with Layer 1 or Layer 2 outputs, and it never "
-                "enters the Testing-Priority decision matrix above -- it "
-                "serves as an independent, population-based recommendation "
-                "only."
-            )
+            st.subheader("Population Context: GenomeIndia")
             ethnicity = st.selectbox("Ethnicity", ETHNICITY_OPTIONS, key="ethnicity_select")
             genomeindia_result = genomeindia_population_priority(ethnicity)
             st.session_state["genomeindia_result"] = genomeindia_result
@@ -922,7 +906,11 @@ with tab1:
             # of Streamlit's three built-in alert-box severities frames it
             # -- st.error/st.warning/st.info carry no logic of their own,
             # they only reflect the value genomeindia_population_priority()
-            # already resolved.
+            # already resolved. The decoupling guarantee itself is enforced
+            # in engine/triage.py (genomeindia_population_priority is never
+            # read by _resolve_priority_state or returned from
+            # triage_pgx_actionability), independent of what this block
+            # renders.
             priority_value = genomeindia_result["genomeindia_priority"]
             priority_message = f"GenomeIndia Population Priority: **{priority_value}**"
             if priority_value == "High Priority":
@@ -931,14 +919,6 @@ with tab1:
                 st.warning(priority_message)
             else:
                 st.info(priority_message)
-
-            st.caption(
-                "Population-level frequencies act as an isolated, "
-                "independent contextual signal; they cannot determine an "
-                "individual's genotype, do not replace clinical prescribing "
-                "guidelines, and do not alter the Testing-Priority state "
-                "above."
-            )
 
     if genotyping_available == "Available":
         st.session_state["genomeindia_result"] = None
