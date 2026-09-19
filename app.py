@@ -366,26 +366,26 @@ def _alert_card(level: str, title: str, body_html: str) -> None:
     )
 
 
-def _web_search_mockup(high_risk_context: bool) -> None:
-    """General Clinical History's Web Search module: a conversational
-    query surface rendered inside a collapsible container, styled with
-    chat-message components rather than a static dropdown or a plain form
-    field. The submitted string is opaque text, never parsed against or
-    matched to a fixed token set -- it is stored verbatim in session state
-    and echoed back as a chat turn, with a placeholder case-report link
-    built directly from that same text. No live search is executed
-    server-side by PRISM-AIIMS itself; the outbound link opens a real
-    PubMed search scoped to the clinician's own query text.
+def _web_search_mockup(history_text: str, high_risk_context: bool) -> None:
+    """General Clinical History's auxiliary Web Search feature.
+
+    This is deliberately not a primary input surface: it owns no text
+    field of its own. The query string it operates on is read directly
+    from `history_text` -- the exact string state already held by the
+    General Clinical History st.text_area -- so there is only one place a
+    clinician records clinical-history text, and the search feature is a
+    read-only consumer of that same state, triggered explicitly by a
+    button click rather than rendered as the section's main component.
+    No live search is executed server-side by PRISM-AIIMS itself; the
+    outbound link opens a real PubMed search scoped to that same string.
     """
-    with st.expander("Web Search — Related Case Reports (Prototype)"):
-        query_text = st.text_input(
-            "Search literature for ADR, Family, or Allergic risks...",
-            key="web_search_query_text",
-            placeholder="e.g. elderly patient warfarin bleeding risk",
-            label_visibility="collapsed",
+    with st.expander("Web Search Assistant"):
+        st.caption(
+            "Simulates a literature search using the text currently "
+            "recorded in General Clinical History above."
         )
-        if st.button("Search", key="web_search_submit") and query_text.strip():
-            st.session_state["web_search_last_query"] = query_text.strip()
+        if st.button("Search Similar Cases", key="web_search_submit"):
+            st.session_state["web_search_last_query"] = history_text.strip() or None
 
         last_query = st.session_state.get("web_search_last_query")
         if last_query:
@@ -396,9 +396,14 @@ def _web_search_mockup(high_risk_context: bool) -> None:
                 url = f"https://pubmed.ncbi.nlm.nih.gov/?term={urllib.parse.quote_plus(last_query)}"
                 st.markdown(
                     f"Simulated search complete — found {case_count} similar "
-                    f"case report(s) for evidence relevant to this query. "
+                    f"case report(s) for evidence relevant to this text. "
                     f"[Search PubMed for this query]({url})"
                 )
+        elif "web_search_last_query" in st.session_state:
+            # The search was triggered at least once, but the text area was
+            # empty at that moment -- distinct from never having been
+            # triggered at all, which renders neither branch.
+            st.info("Record clinical history text above before searching.")
         st.caption(
             "This preview's case count is generated locally for "
             "demonstration purposes; PRISM-AIIMS performs no server-side "
@@ -639,7 +644,25 @@ with tab1:
         with hist_col2:
             family_history = st.checkbox("Family history")
 
-        _web_search_mockup(allergy_history or family_history)
+        # Primary data-ingestion component for this section: a single
+        # string-state variable a clinician records free-text clinical
+        # history into. This string is independent of the boolean
+        # checkboxes above -- it is captured verbatim and later appended
+        # to the integrated clinical report, not parsed into any
+        # structured field.
+        general_clinical_history_text = st.text_area(
+            "Record General Clinical History (ADR, Family, Allergic risks, etc.)",
+            key="general_clinical_history_text",
+            placeholder="e.g. Prior ADR to penicillin in 2019; mother has "
+                        "history of warfarin-related bleeding episode; "
+                        "known seasonal allergy, no drug allergies on file.",
+        )
+
+        # Auxiliary feature, demoted below the primary text-ingestion
+        # component above: it owns no input field of its own and only
+        # reads the string state general_clinical_history_text already
+        # holds when explicitly triggered.
+        _web_search_mockup(general_clinical_history_text, allergy_history or family_history)
 
         adr_result = calculate_adr_risk(
             age=age,
@@ -959,6 +982,16 @@ with tab1:
             st.markdown("**Layer 2 — ADR Risk Prediction (Isolated Verdicts)**")
             st.markdown(f"- ADR in acute vulnerable patient: **{adr_result['adatip_isolated_verdict']}**")
             st.markdown(f"- ADR in chronic fragility: **{adr_result['gerontonet_isolated_verdict']}**")
+            # The General Clinical History string state is appended here
+            # verbatim -- concatenated into the report's own markdown
+            # string, not parsed or restructured -- so the free-text
+            # record a clinician entered above is never silently dropped
+            # from the final integrated output.
+            st.markdown("**Layer 2 — General Clinical History (Free Text)**")
+            if general_clinical_history_text.strip():
+                st.text(general_clinical_history_text.strip())
+            else:
+                st.markdown("_No clinical history text recorded._")
 
             st.markdown("**Layer 3 — Pharmacogenomics**")
             report_result = st.session_state.get("result")

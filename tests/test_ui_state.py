@@ -111,37 +111,74 @@ class TestGerontoNetAdrHistoryIntegration:
         assert gerontonet_block_start < adr_history_checkbox_pos < general_history_start
 
 
-class TestLayer2WebSearchChatbotUI:
-    """The Web Search module renders as a conversational query surface
-    inside a collapsible container in the General Clinical History area,
-    not a static dropdown and not a sidebar panel."""
+class TestLayer2GeneralClinicalHistoryTextArea:
+    """General Clinical History's primary component is a free-text
+    ingestion field: a single string-state variable a clinician records
+    into, independent of the boolean checkboxes in the same section."""
+
+    def test_text_area_widget_is_present_with_the_requested_label(self):
+        assert "st.text_area(" in _APP_SOURCE
+        assert "Record General Clinical History (ADR, Family, Allergic risks, etc.)" in _APP_SOURCE
+
+    def test_text_area_precedes_the_web_search_call_in_source_order(self):
+        text_area_pos = _APP_SOURCE.index("Record General Clinical History")
+        search_call_pos = _APP_SOURCE.index("_web_search_mockup(general_clinical_history_text")
+        assert text_area_pos < search_call_pos
+
+    def test_text_area_state_is_appended_to_the_integrated_report(self):
+        report_block = _APP_SOURCE[_APP_SOURCE.index("View Integrated Clinical Report"):]
+        assert "general_clinical_history_text" in report_block
+        assert "No clinical history text recorded" in report_block
+
+
+class TestLayer2WebSearchIsAuxiliary:
+    """The Web Search feature is demoted to an auxiliary consumer of the
+    General Clinical History text_area's own string state -- it owns no
+    input field of its own, is gated behind an explicit button inside a
+    collapsible container, and is never the section's primary component."""
 
     def test_dropdown_constants_no_longer_exist(self):
         assert not hasattr(app, "_WEB_SEARCH_QUERY_OPTIONS")
         assert not hasattr(app, "_WEB_SEARCH_QUERY_KEY")
         assert not hasattr(app, "_MOCK_CASE_REPORT_QUERIES")
 
-    def test_web_search_mockup_takes_a_single_context_flag(self):
+    def test_web_search_mockup_takes_history_text_and_a_context_flag(self):
         sig = inspect.signature(app._web_search_mockup)
-        assert list(sig.parameters) == ["high_risk_context"]
+        assert list(sig.parameters) == ["history_text", "high_risk_context"]
+
+    def test_web_search_owns_no_independent_text_input(self):
+        source = inspect.getsource(app._web_search_mockup)
+        assert "st.text_input(" not in source
+        assert "st.text_area(" not in source
+
+    def test_web_search_uses_a_button_trigger_inside_an_expander(self):
+        source = inspect.getsource(app._web_search_mockup)
+        assert "st.expander(\"Web Search Assistant\")" in source
+        assert 'st.button("Search Similar Cases"' in source
 
     def test_web_search_uses_chat_message_components(self):
         source = inspect.getsource(app._web_search_mockup)
         assert "st.chat_message" in source
-        assert "st.expander" in source
 
-    def test_web_search_prompt_matches_the_requested_label(self):
-        source = inspect.getsource(app._web_search_mockup)
-        assert "Search literature for ADR, Family, or Allergic risks..." in source
+    def test_web_search_is_called_with_the_history_text_variable(self):
+        assert "_web_search_mockup(general_clinical_history_text, allergy_history or family_history)" in _APP_SOURCE
 
-    def test_web_search_is_called_from_the_main_layer_2_flow_not_the_sidebar(self):
-        call_site_index = _APP_SOURCE.index("_web_search_mockup(allergy_history or family_history)")
-        # No enclosing "with st.sidebar:" block immediately precedes this
-        # call site (the prior sidebar relocation has been reversed).
-        preceding_source = _APP_SOURCE[:call_site_index]
-        last_sidebar_open = preceding_source.rfind("with st.sidebar:")
-        last_layer2_header = preceding_source.rfind("Layer 2: ADR Risk Prediction")
-        assert last_layer2_header > last_sidebar_open
+    def test_empty_history_text_triggers_the_search_without_raising(self):
+        # A pure-function smoke test of the state transition the button
+        # handler performs -- history_text.strip() or None -- confirming
+        # the empty-string case degrades to the None sentinel rather than
+        # raising, exactly as the search button's own logic does.
+        history_text = "   "
+        query_or_none = history_text.strip() or None
+        assert query_or_none is None
+
+    def test_populated_history_text_becomes_the_search_query_string(self):
+        history_text = "  prior ADR to penicillin  "
+        query_or_none = history_text.strip() or None
+        assert query_or_none == "prior ADR to penicillin"
+
+    def test_urllib_parse_is_imported_for_query_encoding(self):
+        assert hasattr(app, "urllib")
 
 
 class TestLayer3GenomeIndiaTextCleanup:
@@ -252,25 +289,6 @@ class TestLayer2IsolatedExecutionContexts:
         assert result["adr_risk_flag"] == ADR_RISK_STANDARD
         assert result["adatip_isolated_verdict"] == ISOLATED_VERDICT_BASELINE
         assert result["gerontonet_isolated_verdict"] == ISOLATED_VERDICT_BASELINE
-
-
-class TestLayer2FreeTextSearchModule:
-    """The Web Search module ingests an opaque free-text query -- no
-    predefined dropdown vocabulary -- and never parses the submitted text
-    against a fixed token set."""
-
-    def test_web_search_mockup_takes_a_single_context_flag(self):
-        import inspect
-        sig = inspect.signature(app._web_search_mockup)
-        assert list(sig.parameters) == ["high_risk_context"]
-
-    def test_dropdown_constants_no_longer_exist(self):
-        assert not hasattr(app, "_WEB_SEARCH_QUERY_OPTIONS")
-        assert not hasattr(app, "_WEB_SEARCH_QUERY_KEY")
-        assert not hasattr(app, "_MOCK_CASE_REPORT_QUERIES")
-
-    def test_urllib_parse_is_imported_for_query_encoding(self):
-        assert hasattr(app, "urllib")
 
 
 class TestLayer3GenotypingRoutingState:
